@@ -113,6 +113,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 
 ## 变更记录
 
+### 2026-09-24 — 根目录项目说明
+- 改动：新增面向公开仓库的根目录 README，说明当前模块、启动迁移、敏感信息边界、测试基线和飞鸽 Desktop Bridge 的真实完成度。
+- 位置：`README.md`、`AGENTS.md`。
+- 验证：通过 CodeGraph 核对主应用入口、包版本、平台过滤与 Desktop Bridge 引用关系；确认当前后端主入口尚未初始化 Desktop Bridge。
+- 待办：在飞鸽 Windows 电脑完成只读探针后，再更新聊天采集能力说明和部署步骤。
+
 ### 2026-09-24 — GitHub 源码同步准备
 - 改动：新增根目录忽略规则与本地迁移清单，保留并排除真实环境配置、密钥、运行数据、客户附件、日志和大型离线依赖。
 - 位置：`.gitignore`、`LOCAL_MIGRATION_CHECKLIST.md`。

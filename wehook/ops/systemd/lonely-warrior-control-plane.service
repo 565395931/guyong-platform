@@ -1,0 +1,21 @@
+[Unit]
+Description=Lonely Warrior SaaS control plane
+After=network.target
+
+[Service]
+Type=simple
+User=lonelywarrior
+Group=lonelywarrior
+WorkingDirectory=/opt/lonely-warrior/control-plane
+EnvironmentFile=/etc/lonely-warrior/control-plane.env
+ExecStart=/usr/bin/node src/saas/controlPlaneServer.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lonely-warrior
+
+[Install]
+WantedBy=multi-user.target

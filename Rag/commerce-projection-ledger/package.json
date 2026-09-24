@@ -1,0 +1,27 @@
+{
+  "name": "@rag/commerce-projection-ledger",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vendor-neutral projection ledger orchestration for external commerce orders",
+  "license": "UNLICENSED",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest --config vitest.config.mts run",
+    "test:coverage": "vitest --config vitest.config.mts run --coverage",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "audit:production": "npm audit --omit=dev --audit-level=high"
+  },
+  "dependencies": {
+    "@rag/commerce-protocol": "file:../shared-protocol/commerce"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "@vitest/coverage-v8": "3.2.7",
+    "typescript": "5.8.2",
+    "vitest": "3.2.7"
+  },
+  "engines": { "node": ">=20" }
+}

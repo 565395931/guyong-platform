@@ -1,0 +1,61 @@
+// 主题色
+$color-primary: #3b82f6;
+$color-primary-dark: #2563eb;
+$color-success: #22c55e;
+$color-warning: #f59e0b;
+$color-danger: #ef4444;
+$color-info: #64748b;
+
+// 中性色
+$color-bg: #f1f5f9;
+$color-bg-white: #ffffff;
+$color-border: #e2e8f0;
+$color-text-primary: #1e293b;
+$color-text-regular: #475569;
+$color-text-secondary: #94a3b8;
+$color-text-placeholder: #cbd5e1;
+
+// 暗黑模式
+$dark-bg: #0f172a;
+$dark-bg-card: #1e293b;
+$dark-border: #334155;
+$dark-text: #e2e8f0;
+
+// 间距
+$spacing-xs: 4px;
+$spacing-sm: 8px;
+$spacing-md: 12px;
+$spacing-lg: 16px;
+$spacing-xl: 24px;
+
+// 圆角
+$radius-sm: 4px;
+$radius-md: 6px;
+$radius-lg: 8px;
+
+// 兼容旧页面变量命名
+$primary-color: $color-primary;
+$primary-light: #dbeafe;
+$success-color: $color-success;
+$warning-color: $color-warning;
+$danger-color: $color-danger;
+$info-color: $color-info;
+$text-primary: $color-text-primary;
+$text-regular: $color-text-regular;
+$text-secondary: $color-text-secondary;
+$text-placeholder: $color-text-placeholder;
+$border-base: $color-border;
+$border-light: #eef2f7;
+$bg-hover: #f8fafc;
+$radius-small: $radius-sm;
+$radius-base: $radius-lg;
+$shadow-light: 0 2px 12px rgba(15, 23, 42, 0.08);
+
+// 布局
+$sidebar-width: 64px;
+$layout-left-width: 380px;
+$layout-right-width: 380px;
+$header-height: 56px;
+
+// 字体
+$font-family: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;

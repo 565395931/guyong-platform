@@ -1,0 +1,55 @@
+# Supply per-instance keys in the deployment environment; see docker/README.md.
+services:
+  waha-1:
+    image: devlikeapro/waha@sha256:abbdd0dd969f06801904e902a9daa853b2e82667ba747eec266abcbeffce5e00
+    container_name: waha-1
+    restart: always
+    ports:
+      - "3005:3000"
+    environment:
+      - WHATSAPP_API_KEY=${WAHA_API_KEY_1:?Set WAHA_API_KEY_1 before starting WAHA}
+      - WHATSAPP_DEFAULT_ENGINE=GOWS
+      - WAHA_GOWS_DEVICE_REQUIRE_FULL_SYNC=false
+      - WAHA_GOWS_DEVICE_HISTORY_SYNC_FULL_SYNC_DAYS_LIMIT=365
+      - WAHA_GOWS_DEVICE_HISTORY_SYNC_RECENT_SYNC_DAYS_LIMIT=30
+      - WAHA_GOWS_DEVICE_HISTORY_SYNC_INITIAL_SYNC_MAX_MESSAGES_PER_CHAT=100
+      - WAHA_GOWS_DEVICE_HISTORY_SYNC_FULL_SYNC_SIZE_MB_LIMIT=512
+      - WAHA_GOWS_DEVICE_HISTORY_SYNC_STORAGE_QUOTA_MB=1024
+      - WHATSAPP_PROXY_SERVER=host.docker.internal:10808
+      - WHATSAPP_HOOK_URL=http://host.docker.internal:3001/api/channel/whatsapp/webhook?account_id=7
+      - WHATSAPP_HOOK_EVENTS=message
+    volumes:
+      - waha-gows-data-1:/app/.sessions
+    networks:
+      - waha-network
+
+  waha-2:
+    image: devlikeapro/waha@sha256:abbdd0dd969f06801904e902a9daa853b2e82667ba747eec266abcbeffce5e00
+    container_name: waha-2
+    restart: always
+    ports:
+      - "3006:3000"
+    environment:
+      - WHATSAPP_API_KEY=${WAHA_API_KEY_2:?Set WAHA_API_KEY_2 before starting WAHA}
+      - WHATSAPP_DEFAULT_ENGINE=GOWS
+      - WAHA_GOWS_DEVICE_REQUIRE_FULL_SYNC=false
+      - WAHA_GOWS_DEVICE_HISTORY_SYNC_FULL_SYNC_DAYS_LIMIT=365
+      - WAHA_GOWS_DEVICE_HISTORY_SYNC_RECENT_SYNC_DAYS_LIMIT=30
+      - WAHA_GOWS_DEVICE_HISTORY_SYNC_INITIAL_SYNC_MAX_MESSAGES_PER_CHAT=100
+      - WAHA_GOWS_DEVICE_HISTORY_SYNC_FULL_SYNC_SIZE_MB_LIMIT=512
+      - WAHA_GOWS_DEVICE_HISTORY_SYNC_STORAGE_QUOTA_MB=1024
+      - WHATSAPP_PROXY_SERVER=host.docker.internal:10808
+      - WHATSAPP_HOOK_URL=http://host.docker.internal:3001/api/channel/whatsapp/webhook?account_id=5
+      - WHATSAPP_HOOK_EVENTS=message
+    volumes:
+      - waha-gows-data-2:/app/.sessions
+    networks:
+      - waha-network
+
+volumes:
+  waha-gows-data-1:
+  waha-gows-data-2:
+
+networks:
+  waha-network:
+    driver: bridge

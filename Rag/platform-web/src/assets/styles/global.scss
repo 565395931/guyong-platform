@@ -1,0 +1,121 @@
+* { margin: 0; padding: 0; box-sizing: border-box; scrollbar-color: $color-text-placeholder transparent; scrollbar-width: thin; }
+html, body, #app { height: 100%; width: 100%; }
+body { font-family: $font-family; background: $color-bg; color: $color-text-primary; -webkit-font-smoothing: antialiased; transition: background 0.3s, color 0.3s; }
+a { text-decoration: none; color: inherit; }
+ul, ol { list-style: none; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: $color-text-placeholder; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: $color-text-secondary; }
+::-webkit-scrollbar-thumb:active { background: $color-info; }
+::-webkit-scrollbar-track { background: transparent; }
+
+@media (forced-colors: active) {
+  * { scrollbar-color: auto; }
+}
+
+// ========== 暗黑模式 ==========
+html.dark {
+  body {
+    background: $dark-bg;
+    color: $dark-text;
+  }
+
+  // 通用覆盖：白色背景 → 深色
+  .el-card,
+  .el-table,
+  .el-dialog,
+  .el-tabs__header,
+  .el-collapse,
+  .el-collapse-item__header,
+  .el-collapse-item__content {
+    background-color: $dark-bg-card !important;
+    color: $dark-text !important;
+  }
+
+  // 卡片边框
+  .el-card {
+    border-color: $dark-border !important;
+  }
+
+  // 表格
+  .el-table {
+    --el-table-bg-color: #{$dark-bg-card};
+    --el-table-tr-bg-color: #{$dark-bg-card};
+    --el-table-border-color: #{$dark-border};
+    --el-table-header-bg-color: #{$dark-bg};
+    --el-table-row-hover-bg-color: #{$dark-bg};
+    color: $dark-text !important;
+
+    th.el-table__cell {
+      background-color: $dark-bg !important;
+      color: $dark-text !important;
+    }
+  }
+
+  // 输入框
+  .el-input__wrapper,
+  .el-textarea__inner {
+    background-color: $dark-bg !important;
+    box-shadow: 0 0 0 1px $dark-border inset !important;
+  }
+  .el-input__inner {
+    color: $dark-text !important;
+  }
+
+  // 对话框
+  .el-dialog {
+    --el-dialog-bg-color: #{$dark-bg-card};
+  }
+
+  // 标签
+  .el-tag {
+    background-color: $dark-bg !important;
+    border-color: $dark-border !important;
+  }
+
+  // 面板/布局
+  .app-header,
+  .app-layout,
+  .app-layout__main,
+  .workbench-view__left,
+  .workbench-view__right,
+  .workbench-view__panel-header,
+  .chat-window__header,
+  .conversation-list,
+  .conversation-list__header,
+  .rag-panel,
+  .user-info-card,
+  .quick-reply-panel {
+    background: $dark-bg-card !important;
+    border-color: $dark-border !important;
+    color: $dark-text !important;
+  }
+
+  // 侧边栏已经是深色，暗黑模式下稍微调暗
+  .app-sidebar {
+    background-color: $dark-bg !important;
+    border-color: $dark-border !important;
+  }
+
+  // 聊天气泡
+  .message-bubble--user .message-bubble__content {
+    background: #334155 !important;
+    color: $dark-text !important;
+  }
+
+  // 内容区背景
+  .content,
+  .workbench-view {
+    background: $dark-bg !important;
+  }
+
+  // 空状态
+  .el-empty__description {
+    color: $color-text-secondary !important;
+  }
+
+  // 下拉菜单
+  .el-select-dropdown__item {
+    color: $dark-text !important;
+  }
+}

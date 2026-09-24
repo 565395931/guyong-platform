@@ -1,0 +1,20 @@
+{
+  "discovery": {
+    "useGitignore": true,
+    "ignoreGlobs": [
+      ".codegraph/**",
+      ".tmp/**",
+      "**/.git/**",
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/coverage/**",
+      "Rag/artifacts/**",
+      "Rag/logs/**",
+      "Rag/output/**",
+      "Rag/tmp/**"
+    ]
+  },
+  "cache": {
+    "location": "project"
+  }
+}

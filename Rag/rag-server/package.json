@@ -1,0 +1,64 @@
+{
+  "name": "rag-server",
+  "version": "1.0.0",
+  "description": "RAG智能客服服务端",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "node src/app.js",
+    "test": "node scripts/run-unit-tests.cjs",
+    "test:desktop-bridge": "node --test src/modules/desktop-bridge/*.test.js",
+    "test:catalog": "node --test src/modules/catalog/*.test.js",
+    "test:platform-connections": "node --test src/modules/platform-connections/*.test.js",
+    "test:message-review": "node --test src/modules/message-review/*.test.js src/modules/messaging/inboundMessage.service.test.js src/workers/aiReplyReviewGuard.test.js"
+  },
+  "dependencies": {
+    "@rag/commerce-projection-ledger": "file:../commerce-projection-ledger",
+    "@rag/commerce-protocol": "file:../shared-protocol/commerce",
+    "@alicloud/bailian20231229": "^2.13.0",
+    "@alicloud/openapi-client": "^0.4.15",
+    "@alicloud/tea-util": "^1.4.11",
+    "@jitsi/robotjs": "^0.6.22",
+    "@langchain/core": "^1.0.0",
+    "@langchain/langgraph": "^1.0.0",
+    "@langchain/langgraph-checkpoint": "^1.1.0",
+    "@langchain/openai": "^1.0.0",
+    "axios": "^1.18.0",
+    "bcryptjs": "^3.0.3",
+    "bullmq": "^5.79.3",
+    "domutils": "^3.2.2",
+    "exceljs": "4.4.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.18.0",
+    "ioredis": "^5.11.1",
+    "htmlparser2": "^10.1.0",
+    "json-bigint": "^1.0.0",
+    "jsonwebtoken": "^9.0.3",
+    "langchain": "^1.0.0",
+    "mammoth": "^1.8.0",
+    "mongoose": "6.13.10",
+    "multer": "^1.4.5-lts.1",
+    "mysql2": "^3.22.5",
+    "openai": "^6.42.0",
+    "p-limit": "^3.1.0",
+    "pdf-parse": "^1.1.1",
+    "pngjs": "^7.0.0",
+    "sequelize": "^6.37.8",
+    "socket.io": "^4.8.3",
+    "uuid": "^14.0.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "overrides": {
+    "body-parser": "1.20.6",
+    "exceljs": {
+      "uuid": "11.1.1"
+    },
+    "ip-address": "10.5.0",
+    "sequelize": {
+      "uuid": "11.1.1"
+    },
+    "socket.io-parser": "4.2.7"
+  }
+}

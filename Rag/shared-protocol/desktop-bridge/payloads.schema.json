@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/desktop-bridge/payloads.schema.json",
+  "title": "Desktop bridge payloads",
+  "$defs": {
+    "nodeHello": {
+      "type": "object",
+      "required": ["machineFingerprint", "version"],
+      "properties": {
+        "pairingCode": { "type": "string", "pattern": "^[A-Z2-7]{8}$" },
+        "enrollmentToken": { "type": "string", "minLength": 16 },
+        "machineFingerprint": { "type": "string", "minLength": 3, "maxLength": 512 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 50 },
+        "adapterIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "capabilities": { "type": "object" }
+      },
+      "anyOf": [
+        { "required": ["pairingCode"] },
+        { "required": ["enrollmentToken"] }
+      ],
+      "additionalProperties": false
+    },
+    "nodeReady": {
+      "type": "object",
+      "required": ["serverTime", "configuration"],
+      "properties": {
+        "serverTime": { "type": "string", "format": "date-time" },
+        "configuration": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "nodeHeartbeat": {
+      "type": "object",
+      "properties": {
+        "leases": { "type": "array", "items": { "type": "object" } },
+        "health": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "accountSnapshot": {
+      "type": "object",
+      "required": ["accounts"],
+      "properties": { "accounts": { "type": "array", "items": { "type": "object" } } },
+      "additionalProperties": false
+    },
+    "accountStateChanged": {
+      "type": "object",
+      "required": ["accountId", "state"],
+      "properties": {
+        "accountId": { "type": "integer", "minimum": 1 },
+        "state": { "enum": ["online", "offline", "degraded", "error"] },
+        "reason": { "type": "string", "maxLength": 500 }
+      },
+      "additionalProperties": false
+    },
+    "messageInbound": {
+      "type": "object",
+      "required": ["accountId", "channel", "platformConversationId", "platformCustomerId", "channelMessageId"],
+      "properties": {
+        "accountId": { "type": "integer", "minimum": 1 },
+        "channel": { "type": "string", "minLength": 1, "maxLength": 50 },
+        "platformConversationId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "platformCustomerId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "channelMessageId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "userName": { "type": "string", "maxLength": 255 },
+        "content": { "type": "string", "maxLength": 200000 },
+        "messageType": { "type": "string", "maxLength": 30 },
+        "clientTimestamp": { "type": "string", "format": "date-time" },
+        "media": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": { "enum": ["image", "video", "audio", "file"] },
+              "url": { "type": "string", "format": "uri" },
+              "name": { "type": "string", "maxLength": 255 },
+              "mimeType": { "type": "string", "maxLength": 120 }
+            },
+            "additionalProperties": true
+          }
+        },
+        "platformPayload": {}
+      },
+      "anyOf": [
+        { "required": ["content"], "properties": { "content": { "minLength": 1 } } },
+        { "required": ["media"], "properties": { "media": { "minItems": 1 } } }
+      ],
+      "additionalProperties": false
+    },
+    "messageSend": {
+      "type": "object",
+      "required": ["accountId", "platformConversationId", "content"],
+      "properties": {
+        "accountId": { "type": "integer", "minimum": 1 },
+        "platformConversationId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "targetUserId": { "type": "string", "maxLength": 255 },
+        "content": { "type": "string", "minLength": 1, "maxLength": 200000 },
+        "messageType": { "type": "string", "maxLength": 30 },
+        "replyToChannelMessageId": { "type": "string", "maxLength": 255 }
+      },
+      "additionalProperties": false
+    },
+    "messageCommandStatus": {
+      "type": "object",
+      "required": ["commandId", "status"],
+      "properties": {
+        "commandId": { "type": "string", "format": "uuid" },
+        "status": { "enum": ["accepted", "succeeded", "failed"] },
+        "platformMessageId": { "type": "string", "maxLength": 255 },
+        "errorCode": { "type": "string", "maxLength": 80 },
+        "errorMessage": { "type": "string", "maxLength": 500 }
+      },
+      "additionalProperties": false
+    },
+    "eventAck": {
+      "type": "object",
+      "required": ["ackForEventId", "status"],
+      "properties": {
+        "ackForEventId": { "type": "string", "format": "uuid" },
+        "status": { "enum": ["processed", "duplicate", "rejected", "retryable_error"] },
+        "errorCode": { "type": "string", "maxLength": 80 },
+        "message": { "type": "string", "maxLength": 500 }
+      },
+      "additionalProperties": false
+    },
+    "serverError": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "retryable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

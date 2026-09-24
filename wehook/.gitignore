@@ -1,0 +1,32 @@
+# Dependencies and builds
+node_modules/
+dist/
+build/
+.cache/
+coverage/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+!.env.control-plane.example
+gateway.local.cmd
+secrets/
+certs/
+*.key
+*.pem
+*.p12
+
+# Runtime data
+data/
+.tmp/
+logs/
+dead-letter/
+*.log
+*.tmp
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

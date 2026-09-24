@@ -1,0 +1,17 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["public"],
+  "locale": "zh-CN",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Form", "Scrollbar", "Toast", "CRUD"],
+  "ownership": {},
+  "requiredCommands": ["unit", "premium"],
+  "commands": {
+    "unit": "npm test",
+    "premium": "npm run check"
+  },
+  "evidence": {
+    "crudFullFlow": "../test/control-plane.integration.test.js",
+    "failurePaths": "../test/control-plane.integration.test.js"
+  }
+}

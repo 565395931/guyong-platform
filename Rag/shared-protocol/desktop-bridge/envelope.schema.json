@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/desktop-bridge/envelope.schema.json",
+  "title": "Desktop bridge envelope",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["protocolVersion", "type", "eventId", "occurredAt", "sentAt", "payload"],
+      "properties": {
+        "protocolVersion": { "const": "1.0" },
+        "type": {
+          "enum": [
+            "node.hello", "node.ready", "node.heartbeat",
+            "account.snapshot", "account.state.changed", "message.inbound",
+            "message.command.status", "event.ack", "server.error"
+          ]
+        },
+        "eventId": { "type": "string", "format": "uuid" },
+        "nodeId": { "type": "string", "format": "uuid" },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "sentAt": { "type": "string", "format": "date-time" },
+        "payload": { "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "not": { "const": "node.hello" } } } },
+          "then": { "required": ["nodeId"] }
+        }
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": ["protocolVersion", "type", "commandId", "nodeId", "occurredAt", "sentAt", "payload"],
+      "properties": {
+        "protocolVersion": { "const": "1.0" },
+        "type": { "const": "message.send" },
+        "commandId": { "type": "string", "format": "uuid" },
+        "nodeId": { "type": "string", "format": "uuid" },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "sentAt": { "type": "string", "format": "date-time" },
+        "payload": { "$ref": "payloads.schema.json#/$defs/messageSend" }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

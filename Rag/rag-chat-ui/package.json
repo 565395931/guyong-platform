@@ -1,0 +1,24 @@
+{
+  "name": "rag-chat-ui",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "RAG智能客服聊天前端",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "element-plus": "^2.5.0",
+    "marked": "^18.0.5",
+    "pinia": "^2.1.0",
+    "vue": "^3.4.0",
+    "vue-router": "^4.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^4.5.0",
+    "sass": "^1.69.0",
+    "vite": "^4.5.0"
+  }
+}

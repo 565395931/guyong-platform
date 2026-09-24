@@ -1,0 +1,33 @@
+@rem Copy this file to gateway.local.cmd when local overrides are needed.
+@rem gateway.local.cmd is ignored by Git and must not contain production secrets.
+
+set "NODE_ENV=development"
+set "GATEWAY_HOST=127.0.0.1"
+set "GATEWAY_PORT=8787"
+set "HEALTH_PORT=8788"
+
+@rem Optional: explicitly select Node.js when it cannot be auto-detected.
+@rem set "GATEWAY_NODE_EXE=C:\Program Files\nodejs\node.exe"
+
+@rem Optional: use a fixed local token. When omitted, start-gateway.cmd creates
+@rem data\gateway-auth-token.txt on first startup.
+@rem set "GATEWAY_AUTH_TOKEN=replace-with-a-local-service-token"
+
+@rem Optional persistence/retry overrides.
+@rem set "GATEWAY_STORE_PATH=D:\project\wehook\data\gateway-store.json"
+@rem set "GATEWAY_HEARTBEAT_MS=15000"
+@rem set "GATEWAY_ACK_TIMEOUT_MS=10000"
+@rem set "GATEWAY_MAX_RETRIES=5"
+
+@rem MySQL Event Store (use a database separate from rag_customer_service).
+@rem set "GATEWAY_STORE_DRIVER=mysql"
+@rem set "GATEWAY_DB_HOST=127.0.0.1"
+@rem set "GATEWAY_DB_PORT=3306"
+@rem set "GATEWAY_DB_NAME=cloud_channel_gateway"
+@rem set "GATEWAY_DB_USER=root"
+@rem set "GATEWAY_DB_PASSWORD=replace-with-local-password"
+@rem set "GATEWAY_DB_LEASE_MS=60000"
+
+@rem Development-only manual inbound endpoint.
+@rem set "GATEWAY_MOCK_INBOUND_ENABLED=true"
+@rem set "GATEWAY_MOCK_INBOUND_TOKEN=replace-with-a-local-mock-token"

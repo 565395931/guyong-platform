@@ -1,0 +1,85 @@
+# Local-only migration notes
+LOCAL_MIGRATION_CHECKLIST.md
+
+# Environment files and machine-local launch configuration
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example
+**/gateway.local.cmd
+
+# Secrets, certificates, private keys, and credentials
+**/secrets/
+**/certs/
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+**/id_ed25519
+**/id_ed25519.*
+**/*auth-token*
+**/*credentials*.json
+
+# Dependencies and package-manager caches
+**/node_modules/
+**/.pnpm-store/
+**/.yarn/
+**/.npm/
+
+# Build, coverage, and release output
+**/dist/
+**/build/
+**/coverage/
+**/release/
+**/.vite/
+**/.cache/
+**/.playwright-cli/
+**/.tmp-electron.zip
+
+# Runtime databases, queues, logs, and generated artifacts
+.codegraph/
+.tmp/
+**/.superpowers/
+Rag/artifacts/
+Rag/data/
+Rag/logs/
+Rag/output/
+Rag/tmp/
+Rag/tmp-*.js
+Rag/rag-server/logs/
+Rag/rag-server/src/private/
+Rag/rag-server/src/public/avatars/
+Rag/rag-server/src/public/generated-invoices/
+Rag/rag-server/src/public/media-files/
+Rag/rag-server/src/public/order-attachments/
+wehook/data/
+wehook/logs/
+wehook/dead-letter/
+**/*.log
+**/*.tmp
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.rdb
+**/*.aof
+
+# Database exports and backups (schema source files remain trackable)
+Rag/artifacts/backup-restore/
+**/backup*.sql
+**/*.bak
+
+# Large redis/mysql offline runtime packages; fetch or transfer separately
+Rag/docker/mysql/images/
+Rag/docker/redis/images/
+Rag/tools/memurai/
+Rag/tools/memurai-*/
+
+# Independent company website repository. It already has its own Git history.
+web/
+
+# Editors and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

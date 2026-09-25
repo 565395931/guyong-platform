@@ -113,6 +113,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 
 ## 变更记录
 
+### 2026-09-25 — 保留离线文件目标目录
+- 改动：为 Docker 安装包、MySQL 镜像和 Redis 镜像目录加入可追踪占位文件，并细化忽略规则，确保全新克隆后目录存在但二进制大文件仍不会进入 Git。
+- 位置：`.gitignore`、`offline/docker/.gitkeep`、`Rag/docker/mysql/images/.gitkeep`、`Rag/docker/redis/images/.gitkeep`、`README.md`。
+- 验证：三个占位文件可追踪、安装包和镜像文件仍被忽略；启动 dry-run 与 CodeGraph 审查通过。
+- 待办：新电脑拉取后将三个网盘文件直接放入已创建的目标目录。
+
 ### 2026-09-25 — 固定 Docker 离线包位置
 - 改动：启动器改为只检查和导入指定位置的 MySQL/Redis 离线镜像，不再联网拉取；新增 Docker Desktop 安装包固定路径，并在 README 写入网盘链接、提取码、目录结构和镜像校验值。
 - 位置：`ops/Platform.Common.ps1`、`ops/Start-Platform.ps1`、`ops/Start-Platform.test.ps1`、`ops/README.md`、`README.md`、`.gitignore`。

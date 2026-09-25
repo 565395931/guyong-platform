@@ -159,6 +159,8 @@ guyong-platform/
             └─ redis-7.4.11-alpine-amd64.tar
 ```
 
+这些目标文件夹已经随仓库创建；新电脑执行 `git pull` 后，直接把下载文件放进去即可。目录里的 `.gitkeep` 只是用于让 Git 保留空文件夹，不要删除也不影响启动。
+
 如果新电脑还没有 Docker Desktop，先运行 `offline/docker/Docker Desktop Installer.exe`，使用 WSL 2 后端完成安装，然后启动 Docker Desktop 并等待引擎正常运行。启动器只使用上面两个固定位置的离线镜像，不会从 Docker Hub 自动下载；首次导入前还会自动核对 SHA-256，避免使用损坏或被替换的镜像包。
 
 可在仓库根目录校验镜像文件是否下载完整：

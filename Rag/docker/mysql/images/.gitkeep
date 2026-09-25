@@ -1,0 +1,1 @@
+# Keep this download target directory in Git; Docker image archives remain ignored.

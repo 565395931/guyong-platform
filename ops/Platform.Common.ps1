@@ -75,6 +75,59 @@ function Read-DotEnvValue([string]$Path, [string]$Name) {
   return $null
 }
 
+function New-PlatformSecret([int]$ByteCount = 32, [switch]$Base64) {
+  $bytes = New-Object byte[] $ByteCount
+  $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try {
+    $generator.GetBytes($bytes)
+  } finally {
+    $generator.Dispose()
+  }
+
+  $value = [Convert]::ToBase64String($bytes)
+  if ($Base64) { return $value }
+  return $value.TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function Set-DotEnvValue([string]$Path, [string]$Name, [string]$Value) {
+  $content = [System.IO.File]::ReadAllText($Path)
+  $line = "$Name=$Value"
+  $pattern = '(?m)^' + [regex]::Escape($Name) + '=.*$'
+  if ([regex]::IsMatch($content, $pattern)) {
+    $content = [regex]::Replace($content, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($match) $line })
+  } else {
+    $content = $content.TrimEnd() + [Environment]::NewLine + $line + [Environment]::NewLine
+  }
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $content, $encoding)
+}
+
+function Initialize-BackendEnvironment([string]$BackendRoot) {
+  $target = Join-Path $BackendRoot '.env'
+  if (Test-Path -LiteralPath $target) { return $false }
+
+  $template = Join-Path $BackendRoot '.env.example'
+  Assert-PlatformFile $template 'Backend environment template'
+  Copy-Item -LiteralPath $template -Destination $target
+
+  Set-DotEnvValue $target 'DB_PASSWORD' (New-PlatformSecret 24)
+  Set-DotEnvValue $target 'JWT_SECRET' (New-PlatformSecret 48)
+  Set-DotEnvValue $target 'PLATFORM_CREDENTIAL_KEY' (New-PlatformSecret 32 -Base64)
+  Set-DotEnvValue $target 'ENCRYPTION_KEY' (New-PlatformSecret 24)
+  return $true
+}
+
+function Initialize-GatewayAuthToken([string]$GatewayRoot) {
+  $dataRoot = Join-Path $GatewayRoot 'data'
+  $target = Join-Path $dataRoot 'gateway-auth-token.txt'
+  if (Test-Path -LiteralPath $target) { return $false }
+
+  New-Item -ItemType Directory -Force -Path $dataRoot | Out-Null
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($target, (New-PlatformSecret 32), $encoding)
+  return $true
+}
+
 function Assert-PlatformFile([string]$Path, [string]$Description) {
   if (-not (Test-Path -LiteralPath $Path)) {
     throw "$Description is missing: $Path"

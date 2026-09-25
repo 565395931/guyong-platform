@@ -101,7 +101,7 @@ Set-Location guyong-platform
 
 ### 3. 安装依赖
 
-一键启动脚本不会替你安装 Node.js 依赖，首次克隆后先执行：
+首次运行 `start-all.bat` 时，如果没有 `node_modules`，启动器会自动安装三个主模块的依赖。也可以提前手动执行：
 
 ```powershell
 Set-Location Rag\rag-server
@@ -119,20 +119,22 @@ Set-Location ..
 
 ### 4. 配置本地环境
 
-至少需要从示例文件创建自己的配置：
+首次运行 `start-all.bat` 时，启动器会自动从示例创建 `Rag\rag-server\.env`，并在本机生成随机数据库密码、JWT 密钥、渠道凭据加密密钥和网关认证 Token，不会把它们提交到 GitHub。
+
+也可以在启动前手动创建配置：
 
 ```powershell
 Copy-Item Rag\rag-server\.env.example Rag\rag-server\.env
 Copy-Item wehook\.env.example wehook\.env
 ```
 
-然后填写本机数据库、Redis、管理员、模型和渠道配置。`.env`、密钥、Token、客户数据、上传附件、数据库数据和运行日志都不会提交到 GitHub。
+模型和正式渠道仍需填写你自己的账号配置。`.env`、密钥、Token、客户数据、上传附件、数据库数据和运行日志都不会提交到 GitHub。
 
 不要直接把生产密钥放进公开仓库。迁移到另一台电脑时，优先重新生成本机密码和密钥；必须复用的渠道凭据请通过加密压缩包、密码管理器或其他独立安全通道传输。
 
 ### 5. 准备 MySQL 和 Redis 镜像
 
-公开仓库没有包含体积很大的离线 Docker 镜像。如果目标电脑能联网，可先执行：
+公开仓库没有包含体积很大的离线 Docker 镜像。启动器会优先使用单独复制的离线镜像；找不到时会自动从 Docker Hub 下载。也可以提前执行：
 
 ```powershell
 docker pull mysql:8.0

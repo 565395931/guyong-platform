@@ -15,14 +15,10 @@ $mysqlImage = 'mysql:8.0'
 $redisImage = 'redis:7-alpine'
 
 Assert-PlatformFile $paths.CoreLauncher 'Core platform launcher'
-Assert-PlatformFile $backendEnv 'Backend environment file'
 Assert-PlatformFile $mysqlCompose 'MySQL compose file'
 Assert-PlatformFile $redisCompose 'Redis compose file'
-Assert-PlatformFile (Join-Path $paths.BackendRoot 'node_modules') 'Backend dependencies'
-Assert-PlatformFile (Join-Path $paths.FrontendRoot 'node_modules') 'Frontend dependencies'
-Assert-PlatformFile (Join-Path $paths.GatewayRoot 'node_modules') 'Gateway dependencies'
 
-$dbHost = Read-DotEnvValue $backendEnv 'DB_HOST'
+$dbHost = if (Test-Path -LiteralPath $backendEnv) { Read-DotEnvValue $backendEnv 'DB_HOST' } else { $null }
 $localDatabase = [string]::IsNullOrWhiteSpace($dbHost) -or $dbHost -in @('localhost', '127.0.0.1', '::1')
 
 if ($DryRun) {
@@ -42,10 +38,68 @@ if ($DryRun) {
       ImageArchive = $paths.RedisImageArchive
     }
     CoreLauncher = $paths.CoreLauncher
+    FirstRunRequired = -not (Test-Path -LiteralPath $backendEnv)
     Services = @('mysql', 'redis', 'gateway-ws', 'gateway-health', 'backend', 'frontend')
   } | ConvertTo-Json -Depth 4
   return
 }
+
+function Install-NodeDependencies([string]$Root, [string]$Name, [ValidateSet('npm', 'pnpm')] [string]$Manager) {
+  if (Test-Path -LiteralPath (Join-Path $Root 'node_modules')) { return }
+
+  Write-Host "[First run] Installing $Name dependencies..." -ForegroundColor Cyan
+  Push-Location $Root
+  try {
+    if ($Manager -eq 'npm') {
+      & npm.cmd ci
+    } else {
+      $pnpm = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+      $corepack = Get-Command corepack.cmd -ErrorAction SilentlyContinue
+      if ($pnpm) {
+        & $pnpm.Source install --frozen-lockfile
+      } elseif ($corepack) {
+        & $corepack.Source pnpm install --frozen-lockfile
+      } else {
+        Write-Host '[First run] pnpm/Corepack is unavailable; using npm without creating a lock file.' -ForegroundColor Yellow
+        & npm.cmd install --no-package-lock
+      }
+    }
+    if ($LASTEXITCODE -ne 0) { throw "$Name dependency installation failed." }
+  } finally {
+    Pop-Location
+  }
+}
+
+function Import-Or-PullDockerImage([string]$Image, [string]$Archive, [string]$Name) {
+  if (Test-DockerImage $docker.Source $Image) { return }
+
+  if (Test-Path -LiteralPath $Archive) {
+    Write-Host "Loading $Name from the local offline image..." -ForegroundColor Cyan
+    & $docker.Source load --input $Archive
+  } else {
+    Write-Host "The offline $Name image is not in this Git clone. Downloading $Image..." -ForegroundColor Cyan
+    & $docker.Source pull $Image
+  }
+  if ($LASTEXITCODE -ne 0 -or -not (Test-DockerImage $docker.Source $Image)) {
+    throw "$Name Docker image '$Image' could not be prepared. Check the network or copy the offline image archive to $Archive"
+  }
+}
+
+$createdBackendEnvironment = Initialize-BackendEnvironment $paths.BackendRoot
+if ($createdBackendEnvironment) {
+  Write-Host '[First run] Created a private backend .env with new machine-local secrets.' -ForegroundColor Green
+}
+$createdGatewayToken = Initialize-GatewayAuthToken $paths.GatewayRoot
+if ($createdGatewayToken) {
+  Write-Host '[First run] Created a private gateway authentication token.' -ForegroundColor Green
+}
+
+Install-NodeDependencies $paths.BackendRoot 'backend' 'npm'
+Install-NodeDependencies $paths.FrontendRoot 'frontend' 'npm'
+Install-NodeDependencies $paths.GatewayRoot 'gateway' 'pnpm'
+
+$dbHost = Read-DotEnvValue $backendEnv 'DB_HOST'
+$localDatabase = [string]::IsNullOrWhiteSpace($dbHost) -or $dbHost -in @('localhost', '127.0.0.1', '::1')
 
 $startMySql = $localDatabase -and -not (Test-PlatformPort 3306)
 $docker = Get-Command docker.exe -ErrorAction Stop
@@ -71,15 +125,7 @@ if ((Test-PlatformPort 6379) -and -not $redisContainerRunning) {
 $startRedis = -not $redisContainerRunning
 
 if ($startMySql) {
-  if (-not (Test-DockerImage $docker.Source $mysqlImage)) {
-    Assert-PlatformFile $paths.MySqlImageArchive 'Offline MySQL image archive'
-    Write-Host '[1/3] Loading MySQL from the project offline image...' -ForegroundColor Cyan
-    & $docker.Source load --input $paths.MySqlImageArchive
-    if ($LASTEXITCODE -ne 0) { throw 'The offline MySQL image could not be loaded.' }
-    if (-not (Test-DockerImage $docker.Source $mysqlImage)) {
-      throw "The offline archive loaded, but Docker image '$mysqlImage' is still unavailable."
-    }
-  }
+  Import-Or-PullDockerImage $mysqlImage $paths.MySqlImageArchive 'MySQL'
 
   $dbPassword = Read-DotEnvValue $backendEnv 'DB_PASSWORD'
   if ([string]::IsNullOrWhiteSpace($dbPassword)) {
@@ -107,15 +153,7 @@ if ($startMySql) {
 }
 
 if ($startRedis) {
-  if (-not (Test-DockerImage $docker.Source $redisImage)) {
-    Assert-PlatformFile $paths.RedisImageArchive 'Offline Redis image archive'
-    Write-Host '[2/3] Loading Redis from the project offline image...' -ForegroundColor Cyan
-    & $docker.Source load --input $paths.RedisImageArchive
-    if ($LASTEXITCODE -ne 0) { throw 'The offline Redis image could not be loaded.' }
-    if (-not (Test-DockerImage $docker.Source $redisImage)) {
-      throw "The offline archive loaded, but Docker image '$redisImage' is still unavailable."
-    }
-  }
+  Import-Or-PullDockerImage $redisImage $paths.RedisImageArchive 'Redis'
 
   Write-Host '[2/3] Starting local Redis...' -ForegroundColor Cyan
   & $docker.Source compose --project-directory $paths.RedisRoot -f $redisCompose up -d --pull never

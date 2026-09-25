@@ -20,14 +20,32 @@ if (-not (Test-Path -LiteralPath $plan.CoreLauncher)) {
 if ($plan.Database.Local -and $plan.Database.Startup -ne 'local-image-compose-if-needed') {
   throw 'Local database startup policy is invalid.'
 }
-if ($plan.Database.Local -and -not (Test-Path -LiteralPath $plan.Database.ImageArchive)) {
-  throw 'The offline MySQL image archive is missing.'
-}
 if ($plan.Cache.Startup -ne 'local-image-compose-if-needed') {
   throw 'Local cache startup policy is invalid.'
 }
-if (-not (Test-Path -LiteralPath $plan.Cache.ImageArchive)) {
-  throw 'The offline Redis image archive is missing.'
+if (-not $plan.Database.ImageArchive.EndsWith('mysql-8.0.46-amd64.tar')) { throw 'The MySQL image archive path is invalid.' }
+if (-not $plan.Cache.ImageArchive.EndsWith('redis-7.4.11-alpine-amd64.tar')) { throw 'The Redis image archive path is invalid.' }
+
+$temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('guyong-startup-test-' + [guid]::NewGuid().ToString('N'))
+try {
+  $temporaryBackend = Join-Path $temporaryRoot 'rag-server'
+  $temporaryGateway = Join-Path $temporaryRoot 'wehook'
+  New-Item -ItemType Directory -Force -Path $temporaryBackend, $temporaryGateway | Out-Null
+  Copy-Item -LiteralPath (Join-Path $expectedRoot 'Rag\rag-server\.env.example') -Destination (Join-Path $temporaryBackend '.env.example')
+
+  if (-not (Initialize-BackendEnvironment $temporaryBackend)) { throw 'First-run backend environment was not created.' }
+  if (Initialize-BackendEnvironment $temporaryBackend) { throw 'Existing backend environment was overwritten.' }
+  $generatedEnvironment = Join-Path $temporaryBackend '.env'
+  if ((Read-DotEnvValue $generatedEnvironment 'DB_PASSWORD').Length -lt 16) { throw 'Generated database password is too short.' }
+  if ((Read-DotEnvValue $generatedEnvironment 'JWT_SECRET').Length -lt 32) { throw 'Generated JWT secret is too short.' }
+  $platformKey = [Convert]::FromBase64String((Read-DotEnvValue $generatedEnvironment 'PLATFORM_CREDENTIAL_KEY'))
+  if ($platformKey.Length -ne 32) { throw 'Generated platform credential key has the wrong size.' }
+  if ((Read-DotEnvValue $generatedEnvironment 'ENCRYPTION_KEY').Length -ne 32) { throw 'Generated encryption key has the wrong size.' }
+
+  if (-not (Initialize-GatewayAuthToken $temporaryGateway)) { throw 'First-run gateway token was not created.' }
+  if (Initialize-GatewayAuthToken $temporaryGateway) { throw 'Existing gateway token was overwritten.' }
+} finally {
+  if (Test-Path -LiteralPath $temporaryRoot) { Remove-Item -LiteralPath $temporaryRoot -Recurse -Force }
 }
 
 $dockerCommand = Get-Command docker.exe -ErrorAction SilentlyContinue

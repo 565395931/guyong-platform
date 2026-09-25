@@ -113,6 +113,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 
 ## 变更记录
 
+### 2026-09-25 — 新电脑首次启动自举
+- 改动：缺少本地环境文件时自动从模板创建并生成机器独立密钥；缺少 Node 依赖时自动安装；离线 Docker 镜像不存在时改为联网拉取；自动生成本地网关 Token。
+- 位置：`ops/Platform.Common.ps1`、`ops/Start-Platform.ps1`、`ops/Start-Platform.test.ps1`、`README.md`。
+- 验证：启动脚本 dry-run、临时目录首次初始化与防覆盖测试、PowerShell 语法检查通过。
+- 待办：在全新 Windows 克隆环境执行完整首次启动，确认 Node 包下载和 Docker Hub 网络可用。
+
 ### 2026-09-24 — 根目录项目说明
 - 改动：新增面向公开仓库的根目录 README，说明当前模块、启动迁移、敏感信息边界、测试基线和飞鸽 Desktop Bridge 的真实完成度。
 - 位置：`README.md`、`AGENTS.md`。

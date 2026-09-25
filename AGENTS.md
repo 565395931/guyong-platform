@@ -113,6 +113,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 
 ## 变更记录
 
+### 2026-09-25 — 固定 Docker 离线包位置
+- 改动：启动器改为只检查和导入指定位置的 MySQL/Redis 离线镜像，不再联网拉取；新增 Docker Desktop 安装包固定路径，并在 README 写入网盘链接、提取码、目录结构和镜像校验值。
+- 位置：`ops/Platform.Common.ps1`、`ops/Start-Platform.ps1`、`ops/Start-Platform.test.ps1`、`ops/README.md`、`README.md`、`.gitignore`。
+- 验证：启动脚本 dry-run、PowerShell 语法、CodeGraph 改动审查、Markdown 链接和离线下载信息检查通过；启动器已加入镜像 SHA-256 校验。
+- 待办：在全新 Windows 电脑按 README 放置三个离线文件并完成首次启动实测。
+
 ### 2026-09-25 — 新电脑首次启动自举
 - 改动：缺少本地环境文件时自动从模板创建并生成机器独立密钥；缺少 Node 依赖时自动安装；离线 Docker 镜像不存在时改为联网拉取；自动生成本地网关 Token。
 - 位置：`ops/Platform.Common.ps1`、`ops/Start-Platform.ps1`、`ops/Start-Platform.test.ps1`、`README.md`。

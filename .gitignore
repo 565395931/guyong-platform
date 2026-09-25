@@ -69,6 +69,7 @@ Rag/artifacts/backup-restore/
 **/*.bak
 
 # Large redis/mysql offline runtime packages; fetch or transfer separately
+offline/
 Rag/docker/mysql/images/
 Rag/docker/redis/images/
 Rag/tools/memurai/

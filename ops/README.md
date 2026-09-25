@@ -12,9 +12,11 @@
 
 如果 Docker 命令已安装但 Docker Desktop 尚未运行，启动脚本会自动启动 Docker Desktop，并等待引擎就绪后再创建本地 MySQL。
 
-MySQL 使用项目自带的离线镜像包 `Rag/docker/mysql/images/mysql-8.0.46-amd64.tar`。如果 Docker 中还没有 `mysql:8.0`，脚本会先从该文件导入；Compose 启动采用 `--pull never`，不会临时连接 Docker Hub。镜像包约 780 MB，请勿当作源码文本编辑。
+MySQL 使用单独下载的离线镜像包 `Rag/docker/mysql/images/mysql-8.0.46-amd64.tar`。如果 Docker 中还没有 `mysql:8.0`，脚本会先检查并从这个固定位置导入；Compose 启动采用 `--pull never`，不会临时连接 Docker Hub。镜像包约 780 MB，请勿当作源码文本编辑。
 
-Redis 同样使用项目自带的 `Rag/docker/redis/images/redis-7.4.11-alpine-amd64.tar`。启动脚本不再依赖 Windows 本机的 Memurai，可直接随项目迁移到安装了 Docker Desktop 的其他 Windows 机器。
+Redis 同样使用固定位置 `Rag/docker/redis/images/redis-7.4.11-alpine-amd64.tar`。启动脚本不会联网拉取缺失镜像；文件缺失时会显示应放置的完整路径。Docker Desktop 安装包建议放在 `offline/docker/Docker Desktop Installer.exe`。
+
+三个大文件不进入 Git。下载地址、提取码、校验值和目录结构见根目录 `README.md` 的“准备 Docker 离线文件”。
 
 查看状态：
 

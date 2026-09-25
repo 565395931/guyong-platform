@@ -3,6 +3,13 @@ $ErrorActionPreference = 'Stop'
 $scriptPath = Join-Path $PSScriptRoot 'Start-Platform.ps1'
 $commonPath = Join-Path $PSScriptRoot 'Platform.Common.ps1'
 . $commonPath
+$scriptSource = Get-Content -Raw -LiteralPath $scriptPath
+if ($scriptSource -match '(?i)docker\.Source\s+pull|docker\s+pull') {
+  throw 'Start-Platform must not download Docker images from the network.'
+}
+if ($scriptSource -notmatch 'Import-OfflineDockerImage') {
+  throw 'Start-Platform no longer enforces the offline image import path.'
+}
 $raw = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -DryRun
 if ($LASTEXITCODE -ne 0) { throw 'Start-Platform dry run failed.' }
 
@@ -25,6 +32,9 @@ if ($plan.Cache.Startup -ne 'local-image-compose-if-needed') {
 }
 if (-not $plan.Database.ImageArchive.EndsWith('mysql-8.0.46-amd64.tar')) { throw 'The MySQL image archive path is invalid.' }
 if (-not $plan.Cache.ImageArchive.EndsWith('redis-7.4.11-alpine-amd64.tar')) { throw 'The Redis image archive path is invalid.' }
+if ($plan.Database.ImageArchiveSha256 -ne '16854BA553167FAF52D7D216F4C7EDE695C3AE657F01F8E7A6FB7D26B878F3D2') { throw 'The MySQL image checksum changed unexpectedly.' }
+if ($plan.Cache.ImageArchiveSha256 -ne '3454E32D6907281D2C092ECCC2ED63089CC6DD59FCDA5A978995E666744360A5') { throw 'The Redis image checksum changed unexpectedly.' }
+if (-not $plan.DockerInstaller.EndsWith('offline\docker\Docker Desktop Installer.exe')) { throw 'The Docker installer path is invalid.' }
 
 $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('guyong-startup-test-' + [guid]::NewGuid().ToString('N'))
 try {

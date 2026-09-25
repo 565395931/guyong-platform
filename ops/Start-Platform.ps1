@@ -13,6 +13,8 @@ $mysqlCompose = Join-Path $paths.MySqlRoot 'docker-compose.yml'
 $redisCompose = Join-Path $paths.RedisRoot 'docker-compose.yml'
 $mysqlImage = 'mysql:8.0'
 $redisImage = 'redis:7-alpine'
+$mysqlArchiveSha256 = '16854BA553167FAF52D7D216F4C7EDE695C3AE657F01F8E7A6FB7D26B878F3D2'
+$redisArchiveSha256 = '3454E32D6907281D2C092ECCC2ED63089CC6DD59FCDA5A978995E666744360A5'
 
 Assert-PlatformFile $paths.CoreLauncher 'Core platform launcher'
 Assert-PlatformFile $mysqlCompose 'MySQL compose file'
@@ -30,14 +32,17 @@ if ($DryRun) {
       Startup = if ($localDatabase) { 'local-image-compose-if-needed' } else { 'external' }
       Image = $mysqlImage
       ImageArchive = $paths.MySqlImageArchive
+      ImageArchiveSha256 = $mysqlArchiveSha256
     }
     Cache = [pscustomobject]@{
       Host = '127.0.0.1'
       Startup = 'local-image-compose-if-needed'
       Image = $redisImage
       ImageArchive = $paths.RedisImageArchive
+      ImageArchiveSha256 = $redisArchiveSha256
     }
     CoreLauncher = $paths.CoreLauncher
+    DockerInstaller = $paths.DockerInstaller
     FirstRunRequired = -not (Test-Path -LiteralPath $backendEnv)
     Services = @('mysql', 'redis', 'gateway-ws', 'gateway-health', 'backend', 'frontend')
   } | ConvertTo-Json -Depth 4
@@ -70,18 +75,19 @@ function Install-NodeDependencies([string]$Root, [string]$Name, [ValidateSet('np
   }
 }
 
-function Import-Or-PullDockerImage([string]$Image, [string]$Archive, [string]$Name) {
+function Import-OfflineDockerImage([string]$Image, [string]$Archive, [string]$ExpectedSha256, [string]$Name) {
   if (Test-DockerImage $docker.Source $Image) { return }
 
-  if (Test-Path -LiteralPath $Archive) {
-    Write-Host "Loading $Name from the local offline image..." -ForegroundColor Cyan
-    & $docker.Source load --input $Archive
-  } else {
-    Write-Host "The offline $Name image is not in this Git clone. Downloading $Image..." -ForegroundColor Cyan
-    & $docker.Source pull $Image
+  Assert-PlatformFile $Archive "$Name offline Docker image archive"
+  Write-Host "Verifying the $Name offline image..." -ForegroundColor Cyan
+  $actualSha256 = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash
+  if ($actualSha256 -ne $ExpectedSha256) {
+    throw "$Name offline image checksum mismatch. Download the file again: $Archive"
   }
+  Write-Host "Loading $Name from the specified offline image..." -ForegroundColor Cyan
+  & $docker.Source load --input $Archive
   if ($LASTEXITCODE -ne 0 -or -not (Test-DockerImage $docker.Source $Image)) {
-    throw "$Name Docker image '$Image' could not be prepared. Check the network or copy the offline image archive to $Archive"
+    throw "$Name offline archive was found but did not provide Docker image '$Image': $Archive"
   }
 }
 
@@ -102,7 +108,13 @@ $dbHost = Read-DotEnvValue $backendEnv 'DB_HOST'
 $localDatabase = [string]::IsNullOrWhiteSpace($dbHost) -or $dbHost -in @('localhost', '127.0.0.1', '::1')
 
 $startMySql = $localDatabase -and -not (Test-PlatformPort 3306)
-$docker = Get-Command docker.exe -ErrorAction Stop
+$docker = Get-Command docker.exe -ErrorAction SilentlyContinue
+if (-not $docker) {
+  if (Test-Path -LiteralPath $paths.DockerInstaller) {
+    throw "Docker Desktop is not installed. Run the installer first, then start Docker Desktop and retry: $($paths.DockerInstaller)"
+  }
+  throw "Docker Desktop is not installed. Download its installer and place it at: $($paths.DockerInstaller)"
+}
 
 if (-not (Test-DockerEngine $docker.Source)) {
   $dockerDesktop = Resolve-DockerDesktopPath
@@ -125,7 +137,7 @@ if ((Test-PlatformPort 6379) -and -not $redisContainerRunning) {
 $startRedis = -not $redisContainerRunning
 
 if ($startMySql) {
-  Import-Or-PullDockerImage $mysqlImage $paths.MySqlImageArchive 'MySQL'
+  Import-OfflineDockerImage $mysqlImage $paths.MySqlImageArchive $mysqlArchiveSha256 'MySQL'
 
   $dbPassword = Read-DotEnvValue $backendEnv 'DB_PASSWORD'
   if ([string]::IsNullOrWhiteSpace($dbPassword)) {
@@ -153,7 +165,7 @@ if ($startMySql) {
 }
 
 if ($startRedis) {
-  Import-Or-PullDockerImage $redisImage $paths.RedisImageArchive 'Redis'
+  Import-OfflineDockerImage $redisImage $paths.RedisImageArchive $redisArchiveSha256 'Redis'
 
   Write-Host '[2/3] Starting local Redis...' -ForegroundColor Cyan
   & $docker.Source compose --project-directory $paths.RedisRoot -f $redisCompose up -d --pull never

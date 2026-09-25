@@ -134,14 +134,46 @@ Copy-Item wehook\.env.example wehook\.env
 
 ### 5. 准备 MySQL 和 Redis 镜像
 
-公开仓库没有包含体积很大的离线 Docker 镜像。启动器会优先使用单独复制的离线镜像；找不到时会自动从 Docker Hub 下载。也可以提前执行：
+公开仓库不包含 Docker Desktop 安装包和两个大体积镜像。请从下面的网盘链接下载，并保持文件名不变：
 
-```powershell
-docker pull mysql:8.0
-docker pull redis:7-alpine
+| 文件 | 下载地址 | 提取码 | 下载后放置位置（相对仓库根目录） |
+| --- | --- | --- | --- |
+| `Docker Desktop Installer.exe` | [百度网盘](https://pan.baidu.com/s/1fhMcwksA7TtBFZIzZ4OR1g?pwd=zmy3) | `zmy3` | `offline/docker/Docker Desktop Installer.exe` |
+| `mysql-8.0.46-amd64.tar` | [百度网盘](https://pan.baidu.com/s/1sbs_FLN6RfYNU54u2YbSBw?pwd=vj1i) | `vj1i` | `Rag/docker/mysql/images/mysql-8.0.46-amd64.tar` |
+| `redis-7.4.11-alpine-amd64.tar` | [百度网盘](https://pan.baidu.com/s/1FFCqLN2vtfy8QPlTVxfsXw?pwd=fxzy) | `fxzy` | `Rag/docker/redis/images/redis-7.4.11-alpine-amd64.tar` |
+
+完整目录应当是：
+
+```text
+guyong-platform/
+├─ offline/
+│  └─ docker/
+│     └─ Docker Desktop Installer.exe
+└─ Rag/
+   └─ docker/
+      ├─ mysql/
+      │  └─ images/
+      │     └─ mysql-8.0.46-amd64.tar
+      └─ redis/
+         └─ images/
+            └─ redis-7.4.11-alpine-amd64.tar
 ```
 
-如果目标电脑不能联网，需要从原电脑单独复制相应离线镜像文件；不要把它们重新提交到 GitHub。
+如果新电脑还没有 Docker Desktop，先运行 `offline/docker/Docker Desktop Installer.exe`，使用 WSL 2 后端完成安装，然后启动 Docker Desktop 并等待引擎正常运行。启动器只使用上面两个固定位置的离线镜像，不会从 Docker Hub 自动下载；首次导入前还会自动核对 SHA-256，避免使用损坏或被替换的镜像包。
+
+可在仓库根目录校验镜像文件是否下载完整：
+
+```powershell
+Get-FileHash .\Rag\docker\mysql\images\mysql-8.0.46-amd64.tar -Algorithm SHA256
+Get-FileHash .\Rag\docker\redis\images\redis-7.4.11-alpine-amd64.tar -Algorithm SHA256
+```
+
+正确 SHA-256：
+
+- MySQL：`16854BA553167FAF52D7D216F4C7EDE695C3AE657F01F8E7A6FB7D26B878F3D2`
+- Redis：`3454E32D6907281D2C092ECCC2ED63089CC6DD59FCDA5A978995E666744360A5`
+
+这些目录已被 `.gitignore` 排除，不要把安装包和镜像重新提交到 GitHub。
 
 ### 6. 启动与查看状态
 

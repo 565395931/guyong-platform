@@ -15,6 +15,7 @@ function Get-PlatformPaths {
     MySqlImageArchive = Join-Path $ragRoot 'docker\mysql\images\mysql-8.0.46-amd64.tar'
     RedisRoot = Join-Path $ragRoot 'docker\redis'
     RedisImageArchive = Join-Path $ragRoot 'docker\redis\images\redis-7.4.11-alpine-amd64.tar'
+    DockerInstaller = Join-Path $script:ProjectRoot 'offline\docker\Docker Desktop Installer.exe'
     CoreLauncher = Join-Path $ragRoot 'tools\local-deploy\start-local-platform.ps1'
   }
 }
@@ -150,7 +151,8 @@ function Test-DockerEngine([string]$DockerPath) {
 function Resolve-DockerDesktopPath {
   $candidates = @(
     (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'),
-    (Join-Path $env:LOCALAPPDATA 'Docker\Docker Desktop.exe')
+    (Join-Path $env:LOCALAPPDATA 'Docker\Docker Desktop.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\Docker Desktop.exe')
   )
   return $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }

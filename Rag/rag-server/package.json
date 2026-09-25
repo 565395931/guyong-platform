@@ -5,7 +5,7 @@
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",
-    "dev": "node src/app.js",
+    "dev": "node --watch src/app.js",
     "test": "node scripts/run-unit-tests.cjs",
     "test:desktop-bridge": "node --test src/modules/desktop-bridge/*.test.js",
     "test:catalog": "node --test src/modules/catalog/*.test.js",

@@ -78,7 +78,7 @@ codegraph rdeps "Rag/rag-server/src/routes/auth.js" --root .
 只运行与改动相关的最小集合；准备交付或修改共享边界时再跑完整集合。
 
 ```powershell
-# 后端：当前基线 540 项
+# 后端：当前基线 541 项
 Set-Location Rag/rag-server
 npm.cmd test
 
@@ -112,6 +112,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 只记录功能、架构、配置、数据迁移和部署行为的变化。格式化、临时截图、缓存与构建产物不进入记录。
 
 ## 变更记录
+
+### 2026-09-25 — 热重载与客户升级协议预留
+- 改动：后端开发命令启用 Node watch 热重载；新增客户升级清单 Schema、HTTPS/SHA-256/Ed25519 合同校验及安全升级边界，尚未启用自动下载或安装。
+- 位置：`Rag/rag-server/package.json`、`ops/update`、README。
+- 验证：后端 541 项、更新清单正反例合同、JSON 解析、PowerShell 语法和 CodeGraph 审查均通过。
+- 待办：确定正式更新域名和签名公钥后，再实现独立更新器、版本包、健康检查回滚及管理员“检查更新”入口。
 
 ### 2026-09-25 — 管理员一键重启后端
 - 改动：用户下拉菜单新增仅管理员可见的“重启后端”，包含二次确认、重启中锁定、进程 PID 恢复检测和持久错误提示；后端通过独立 Windows 脚本安全拉起新进程，启动器会在源码更新后自动重建前端。

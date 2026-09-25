@@ -208,9 +208,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 
 更详细的启动说明见 [`ops/README.md`](ops/README.md)，桌面打包说明见 [`Rag/platform-web/README.desktop.md`](Rag/platform-web/README.desktop.md)。
 
+### 测试阶段热重载
+
+前端开发命令本身支持页面热更新；后端开发命令现在会在已加载的源码发生变化时自动重启。先确保 MySQL、Redis 等基础服务已经运行，再分别在两个终端执行：
+
+```powershell
+Set-Location Rag\rag-server
+npm.cmd run dev
+
+Set-Location ..\platform-web
+npm.cmd run dev
+```
+
+热重载只用于开发电脑。客户现场升级不会采用源码拉取，已预留的签名清单和安全边界见 [`ops/update/README.md`](ops/update/README.md)。
+
 ## 验证
 
-当前代码基线：后端 536 项、前端 148 项、网关 50 项。测试数量会随开发变化，以实际输出为准。
+当前代码基线：后端 541 项、前端 152 项、网关 50 项。测试数量会随开发变化，以实际输出为准。
 
 ```powershell
 Set-Location Rag\rag-server

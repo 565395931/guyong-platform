@@ -24,3 +24,11 @@ test('header routes navigation commands without replacing reminder and user cont
   assert.match(source, /reminderSettings/)
   assert.match(source, /handleCommand/)
 })
+
+test('administrator user menu exposes a guarded backend restart action', () => {
+  assert.match(source, /v-if="isAdmin"/)
+  assert.match(source, /command="restart-backend"/)
+  assert.match(source, /ElMessageBox\.confirm/)
+  assert.match(source, /waitForBackendRestart/)
+  assert.match(source, /:disabled="restartingBackend"/)
+})

@@ -81,6 +81,14 @@
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item command="settings">个人设置</el-dropdown-item>
+            <el-dropdown-item
+              v-if="isAdmin"
+              command="restart-backend"
+              :icon="RefreshRight"
+              :disabled="restartingBackend"
+            >
+              {{ restartingBackend ? '后端重启中…' : '重启后端' }}
+            </el-dropdown-item>
             <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
           </el-dropdown-menu>
         </template>
@@ -92,13 +100,14 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowDown, Bell, Menu, Setting, VideoPlay } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ArrowDown, Bell, Menu, RefreshRight, Setting, VideoPlay } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/stores/user'
 import { messageReminder, SOUND_TONE_OPTIONS } from '@/utils/messageReminder'
 import { resolveChannelChrome } from '@/modules/navigation/channelChrome'
 import ChannelStatusIndicator from './ChannelStatusIndicator.vue'
 import { getDesktopBridge } from '@/utils/runtimeConfig'
+import { restartBackend, waitForBackendRestart } from '@/api/systemControl'
 
 const route = useRoute()
 const router = useRouter()
@@ -109,7 +118,9 @@ const pageTitle = computed(() => route.meta?.title || '工作台')
 const channelChrome = computed(() => resolveChannelChrome(route.meta?.channelCode))
 const username = computed(() => userStore.userInfo?.username || '客服')
 const avatar = computed(() => userStore.userInfo?.avatar || '')
+const isAdmin = computed(() => userStore.userInfo?.role === 'admin')
 const isDesktop = Boolean(getDesktopBridge())
+const restartingBackend = ref(false)
 const reminderSettings = ref(messageReminder.getSettings())
 const desktopPermission = ref(messageReminder.getDesktopPermission())
 const soundToneOptions = SOUND_TONE_OPTIONS
@@ -162,11 +173,55 @@ const handleDesktopChange = async (enabled) => {
   }
 }
 
-const handleCommand = (command) => {
+const handleRestartBackend = async () => {
+  if (restartingBackend.value) return
+  try {
+    await ElMessageBox.confirm(
+      '重启期间工作台会短暂断开，通常需要几秒钟。确定现在重启吗？',
+      '重启后端服务',
+      {
+        confirmButtonText: '重启后端',
+        cancelButtonText: '取消',
+        type: 'warning',
+        autofocus: false
+      }
+    )
+  } catch {
+    return
+  }
+
+  restartingBackend.value = true
+  const progressMessage = ElMessage({
+    message: '后端正在重启，请稍候…',
+    type: 'info',
+    duration: 0,
+    showClose: true
+  })
+  try {
+    const { previousPid } = await restartBackend()
+    await waitForBackendRestart(previousPid)
+    progressMessage.close()
+    ElMessage.success('后端已重启并恢复连接')
+  } catch (error) {
+    progressMessage.close()
+    ElMessage({
+      message: error?.message || '后端重启失败，请稍后重试',
+      type: 'error',
+      duration: 0,
+      showClose: true
+    })
+  } finally {
+    restartingBackend.value = false
+  }
+}
+
+const handleCommand = async (command) => {
   if (command === 'logout') {
     userStore.logout()
   } else if (command === 'settings') {
     router.push('/settings/profile')
+  } else if (command === 'restart-backend') {
+    await handleRestartBackend()
   }
 }
 </script>

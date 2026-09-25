@@ -78,11 +78,11 @@ codegraph rdeps "Rag/rag-server/src/routes/auth.js" --root .
 只运行与改动相关的最小集合；准备交付或修改共享边界时再跑完整集合。
 
 ```powershell
-# 后端：当前基线 536 项
+# 后端：当前基线 540 项
 Set-Location Rag/rag-server
 npm.cmd test
 
-# 前端：当前基线 148 项；界面或构建配置变更还需 build
+# 前端：当前基线 152 项；界面或构建配置变更还需 build
 Set-Location Rag/platform-web
 npm.cmd test
 npm.cmd run build
@@ -112,6 +112,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 只记录功能、架构、配置、数据迁移和部署行为的变化。格式化、临时截图、缓存与构建产物不进入记录。
 
 ## 变更记录
+
+### 2026-09-25 — 管理员一键重启后端
+- 改动：用户下拉菜单新增仅管理员可见的“重启后端”，包含二次确认、重启中锁定、进程 PID 恢复检测和持久错误提示；后端通过独立 Windows 脚本安全拉起新进程。
+- 位置：`Rag/platform-web/src/components/Layout/AppHeader.vue`、`Rag/platform-web/src/api/systemControl.js`、`Rag/rag-server/src/routes/systemControl.js`、`Rag/tools/local-deploy/restart-backend.ps1`。
+- 验证：后端 540 项、前端 152 项、前端生产构建、PowerShell 语法与 dry-run、Premium UI 严格审计均通过。
+- 待办：无。
 
 ### 2026-09-25 — 同时开放本机与局域网工作台入口
 - 改动：Vite 预览服务改为监听 `0.0.0.0:3003`，启动完成和状态命令同时显示本机 `LocalUrl` 与局域网 `LanUrl`，并额外打印两个工作台入口。

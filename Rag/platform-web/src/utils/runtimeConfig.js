@@ -1,13 +1,14 @@
 import { apiUrl, assetUrl } from './connectionUrls.js'
 
 const desktopConfig = typeof window !== 'undefined' ? window.desktopBridge?.config : null
+const viteEnvironment = import.meta.env || {}
 
 export const runtimeConfig = Object.freeze({
   isDesktop: Boolean(typeof window !== 'undefined' && window.desktopBridge?.isDesktop),
-  apiBaseUrl: desktopConfig?.apiBaseUrl || import.meta.env.VITE_API_BASE_URL || '/api',
-  wsUrl: desktopConfig?.wsUrl || import.meta.env.VITE_WS_URL || '',
+  apiBaseUrl: desktopConfig?.apiBaseUrl || viteEnvironment.VITE_API_BASE_URL || '/api',
+  wsUrl: desktopConfig?.wsUrl || viteEnvironment.VITE_WS_URL || '',
   serverUrl: desktopConfig?.serverUrl || '',
-  mode: desktopConfig?.mode || (import.meta.env.VITE_API_BASE_URL ? 'configured-server' : 'vite-proxy')
+  mode: desktopConfig?.mode || (viteEnvironment.VITE_API_BASE_URL ? 'configured-server' : 'vite-proxy')
 })
 
 export function getDesktopBridge() {

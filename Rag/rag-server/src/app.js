@@ -56,6 +56,7 @@ const customerRoutes = require('./routes/customers')
 const channelStatusRoutes = require('./routes/channelStatus')
 const toolsInvoiceRoutes = require('./routes/toolsInvoices')
 const systemLogRoutes = require('./routes/systemLogs')
+const { createSystemControlRouter } = require('./routes/systemControl')
 const catalogRoutes = require('./modules/catalog')
 const warehouseRoutes = require('./modules/warehouse')
 const platformSkuMappingRoutes = require('./modules/platform-sku-mapping')
@@ -264,6 +265,8 @@ app.use('/api/v1/waha', wahaProxyRoutes)
 app.use('/api/v1/test-tool', testToolRoutes)
 // 系统日志查询路由（admin）
 app.use('/api/v1/system-logs', systemLogRoutes)
+// 本地测试运维控制（需 JWT 认证 + admin 权限；生产环境默认关闭）
+app.use('/api/v1/system-control', createSystemControlRouter())
 // 媒体文件管理路由（上传需 admin/supervisor/agent，删除需 admin/supervisor）
 app.use('/api/v1/media-files', mediaFileRoutes)
 // 快捷指令管理路由（查询需 agent/supervisor/admin，管理需 admin/supervisor）

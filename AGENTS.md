@@ -113,6 +113,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 
 ## 变更记录
 
+### 2026-09-25 — 首次启动自动构建本地包
+- 改动：启动器按协议包、投影账本、后端的依赖顺序自动补装并构建本地 TypeScript 包；发现后端已安装副本缺少 `dist/index.js` 时自动刷新依赖并验证产物。
+- 位置：`ops/Platform.Common.ps1`、`ops/Start-Platform.ps1`、`ops/Start-Platform.test.ps1`、`ops/README.md`、`README.md`。
+- 验证：两个本地包真实构建、后端模块解析、启动 dry-run、PowerShell 语法与 CodeGraph 审查通过。
+- 待办：在发生过 `MODULE_NOT_FOUND` 的新电脑拉取后重新运行一键启动，确认自动恢复完整链路。
+
 ### 2026-09-25 — 保留离线文件目标目录
 - 改动：为 Docker 安装包、MySQL 镜像和 Redis 镜像目录加入可追踪占位文件，并细化忽略规则，确保全新克隆后目录存在但二进制大文件仍不会进入 Git。
 - 位置：`.gitignore`、`offline/docker/.gitkeep`、`Rag/docker/mysql/images/.gitkeep`、`Rag/docker/redis/images/.gitkeep`、`README.md`。

@@ -43,16 +43,23 @@ if ($DryRun) {
     }
     CoreLauncher = $paths.CoreLauncher
     DockerInstaller = $paths.DockerInstaller
+    LocalPackageBuildOrder = @('commerce-protocol', 'commerce-projection-ledger', 'rag-server')
     FirstRunRequired = -not (Test-Path -LiteralPath $backendEnv)
     Services = @('mysql', 'redis', 'gateway-ws', 'gateway-health', 'backend', 'frontend')
   } | ConvertTo-Json -Depth 4
   return
 }
 
-function Install-NodeDependencies([string]$Root, [string]$Name, [ValidateSet('npm', 'pnpm')] [string]$Manager) {
-  if (Test-Path -LiteralPath (Join-Path $Root 'node_modules')) { return }
+function Install-NodeDependencies(
+  [string]$Root,
+  [string]$Name,
+  [ValidateSet('npm', 'pnpm')] [string]$Manager,
+  [switch]$Force
+) {
+  if (-not $Force -and (Test-Path -LiteralPath (Join-Path $Root 'node_modules'))) { return }
 
-  Write-Host "[First run] Installing $Name dependencies..." -ForegroundColor Cyan
+  $action = if ($Force) { 'Refreshing' } else { 'Installing' }
+  Write-Host "[First run] $action $Name dependencies..." -ForegroundColor Cyan
   Push-Location $Root
   try {
     if ($Manager -eq 'npm') {
@@ -73,6 +80,43 @@ function Install-NodeDependencies([string]$Root, [string]$Name, [ValidateSet('np
   } finally {
     Pop-Location
   }
+}
+
+function Test-NodePackageBuildRequired([string]$Root) {
+  $artifact = Join-Path $Root 'dist\index.js'
+  if (-not (Test-Path -LiteralPath $artifact)) { return $true }
+
+  $inputs = @(
+    (Join-Path $Root 'package.json'),
+    (Join-Path $Root 'tsconfig.json')
+  )
+  $sourceRoot = Join-Path $Root 'src'
+  if (Test-Path -LiteralPath $sourceRoot) {
+    $inputs += Get-ChildItem -LiteralPath $sourceRoot -File -Recurse | Select-Object -ExpandProperty FullName
+  }
+  $artifactTime = (Get-Item -LiteralPath $artifact).LastWriteTimeUtc
+  return $null -ne ($inputs | Where-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc -gt $artifactTime } | Select-Object -First 1)
+}
+
+function Build-LocalNodePackage(
+  [string]$Root,
+  [string]$Name,
+  [switch]$ForceBuild,
+  [switch]$ForceDependencies
+) {
+  $needsBuild = $ForceBuild -or (Test-NodePackageBuildRequired $Root)
+  if (-not $needsBuild) { return }
+
+  Install-NodeDependencies $Root $Name 'npm' -Force:$ForceDependencies
+  Write-Host "[First run] Building local package $Name..." -ForegroundColor Cyan
+  Push-Location $Root
+  try {
+    & npm.cmd run build
+    if ($LASTEXITCODE -ne 0) { throw "$Name build failed." }
+  } finally {
+    Pop-Location
+  }
+  Assert-PlatformFile (Join-Path $Root 'dist\index.js') "$Name build artifact"
 }
 
 function Import-OfflineDockerImage([string]$Image, [string]$Archive, [string]$ExpectedSha256, [string]$Name) {
@@ -100,7 +144,24 @@ if ($createdGatewayToken) {
   Write-Host '[First run] Created a private gateway authentication token.' -ForegroundColor Green
 }
 
-Install-NodeDependencies $paths.BackendRoot 'backend' 'npm'
+$protocolNeedsBuild = Test-NodePackageBuildRequired $paths.CommerceProtocolRoot
+Build-LocalNodePackage $paths.CommerceProtocolRoot '@rag/commerce-protocol' -ForceBuild:$protocolNeedsBuild
+
+$ledgerNeedsBuild = $protocolNeedsBuild -or (Test-NodePackageBuildRequired $paths.CommerceProjectionLedgerRoot)
+$ledgerProtocolArtifact = Join-Path $paths.CommerceProjectionLedgerRoot 'node_modules\@rag\commerce-protocol\dist\index.js'
+$refreshLedgerDependencies = $protocolNeedsBuild -or -not (Test-Path -LiteralPath $ledgerProtocolArtifact)
+Build-LocalNodePackage $paths.CommerceProjectionLedgerRoot '@rag/commerce-projection-ledger' `
+  -ForceBuild:$ledgerNeedsBuild `
+  -ForceDependencies:$refreshLedgerDependencies
+
+$installedProtocolArtifact = Join-Path $paths.BackendRoot 'node_modules\@rag\commerce-protocol\dist\index.js'
+$installedLedgerArtifact = Join-Path $paths.BackendRoot 'node_modules\@rag\commerce-projection-ledger\dist\index.js'
+$refreshBackendDependencies = $protocolNeedsBuild -or $ledgerNeedsBuild -or `
+  -not (Test-Path -LiteralPath $installedProtocolArtifact) -or `
+  -not (Test-Path -LiteralPath $installedLedgerArtifact)
+Install-NodeDependencies $paths.BackendRoot 'backend' 'npm' -Force:$refreshBackendDependencies
+Assert-PlatformFile $installedProtocolArtifact 'Installed commerce protocol package'
+Assert-PlatformFile $installedLedgerArtifact 'Installed commerce projection ledger package'
 Install-NodeDependencies $paths.FrontendRoot 'frontend' 'npm'
 Install-NodeDependencies $paths.GatewayRoot 'gateway' 'pnpm'
 

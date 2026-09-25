@@ -8,7 +8,9 @@
 4. `Rag/rag-server` 后端。
 5. `Rag/platform-web` 工作台。
 
-启动脚本只读取现有 `.env`，不会打印数据库密码或网关令牌。它不会自动安装依赖，也不会启动官网、旧管理端、旧聊天端或 Commerce PoC。
+启动脚本不会打印数据库密码或网关令牌；首次运行会创建机器本地 `.env`、安装主链路缺失的依赖并构建必要的本地包。它不会启动官网、旧管理端、旧聊天端或 Commerce PoC。
+
+新电脑首次启动时，脚本会按 `shared-protocol/commerce` → `commerce-projection-ledger` → `rag-server` 的顺序检查本地 TypeScript 包。`dist/index.js` 缺失或源码较新时会自动安装该包依赖并构建；如果后端 `node_modules` 中仍是缺少构建产物的旧副本，会自动刷新后端依赖。
 
 如果 Docker 命令已安装但 Docker Desktop 尚未运行，启动脚本会自动启动 Docker Desktop，并等待引擎就绪后再创建本地 MySQL。
 

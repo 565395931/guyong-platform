@@ -10,6 +10,8 @@ function Get-PlatformPaths {
     RagRoot = $ragRoot
     BackendRoot = Join-Path $ragRoot 'rag-server'
     FrontendRoot = Join-Path $ragRoot 'platform-web'
+    CommerceProtocolRoot = Join-Path $ragRoot 'shared-protocol\commerce'
+    CommerceProjectionLedgerRoot = Join-Path $ragRoot 'commerce-projection-ledger'
     GatewayRoot = Join-Path $script:ProjectRoot 'wehook'
     MySqlRoot = Join-Path $ragRoot 'docker\mysql'
     MySqlImageArchive = Join-Path $ragRoot 'docker\mysql\images\mysql-8.0.46-amd64.tar'

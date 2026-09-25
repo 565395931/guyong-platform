@@ -35,6 +35,17 @@ if (-not $plan.Cache.ImageArchive.EndsWith('redis-7.4.11-alpine-amd64.tar')) { t
 if ($plan.Database.ImageArchiveSha256 -ne '16854BA553167FAF52D7D216F4C7EDE695C3AE657F01F8E7A6FB7D26B878F3D2') { throw 'The MySQL image checksum changed unexpectedly.' }
 if ($plan.Cache.ImageArchiveSha256 -ne '3454E32D6907281D2C092ECCC2ED63089CC6DD59FCDA5A978995E666744360A5') { throw 'The Redis image checksum changed unexpectedly.' }
 if (-not $plan.DockerInstaller.EndsWith('offline\docker\Docker Desktop Installer.exe')) { throw 'The Docker installer path is invalid.' }
+if (($plan.LocalPackageBuildOrder -join ',') -ne 'commerce-protocol,commerce-projection-ledger,rag-server') {
+  throw 'The local package build order changed unexpectedly.'
+}
+
+$startupSource = Get-Content -Raw -LiteralPath $scriptPath
+foreach ($requiredBuildStep in @('Build-LocalNodePackage $paths.CommerceProtocolRoot', 'Build-LocalNodePackage $paths.CommerceProjectionLedgerRoot')) {
+  if (-not $startupSource.Contains($requiredBuildStep)) { throw "Missing local package build step: $requiredBuildStep" }
+}
+if (-not $startupSource.Contains("Assert-PlatformFile `$installedLedgerArtifact")) {
+  throw 'Startup does not verify the installed projection ledger artifact.'
+}
 
 $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('guyong-startup-test-' + [guid]::NewGuid().ToString('N'))
 try {

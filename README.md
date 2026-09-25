@@ -101,10 +101,18 @@ Set-Location guyong-platform
 
 ### 3. 安装依赖
 
-首次运行 `start-all.bat` 时，如果没有 `node_modules`，启动器会自动安装三个主模块的依赖。也可以提前手动执行：
+首次运行 `start-all.bat` 时，启动器会先按依赖顺序构建 `@rag/commerce-protocol` 和 `@rag/commerce-projection-ledger`，再安装后端、前端和网关依赖。缺少 `dist/index.js` 的本地包会被自动修复，不需要在新电脑手动构建。也可以提前手动执行：
 
 ```powershell
-Set-Location Rag\rag-server
+Set-Location Rag\shared-protocol\commerce
+npm.cmd ci
+npm.cmd run build
+
+Set-Location ..\..\commerce-projection-ledger
+npm.cmd ci
+npm.cmd run build
+
+Set-Location ..\rag-server
 npm.cmd ci
 
 Set-Location ..\platform-web

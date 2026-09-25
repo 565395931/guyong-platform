@@ -5,6 +5,14 @@ if (-not (Test-Path -LiteralPath $scriptPath)) {
   throw "Deployment script is missing: $scriptPath"
 }
 
+$scriptSource = Get-Content -Raw -LiteralPath $scriptPath
+if ($scriptSource -notmatch 'function Test-FrontendBuildRequired') {
+  throw 'Deployment script must detect stale frontend build output after a source update.'
+}
+if ($scriptSource -notmatch 'LastWriteTimeUtc') {
+  throw 'Frontend freshness detection must compare source and artifact timestamps.'
+}
+
 $raw = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath `
   -DryRun `
   -FrontendHost '192.168.1.25'

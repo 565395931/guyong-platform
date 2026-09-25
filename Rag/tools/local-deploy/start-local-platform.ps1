@@ -44,6 +44,26 @@ function Wait-ListeningPort([string]$Name, [int]$Port, [int]$TimeoutSeconds = 30
   throw "$Name did not listen on port $Port within $TimeoutSeconds seconds."
 }
 
+function Test-FrontendBuildRequired([string]$Root) {
+  $artifact = Join-Path $Root 'dist\index.html'
+  if (-not (Test-Path -LiteralPath $artifact)) { return $true }
+
+  $inputs = @(
+    (Join-Path $Root 'package.json'),
+    (Join-Path $Root 'package-lock.json'),
+    (Join-Path $Root 'vite.config.js')
+  ) | Where-Object { Test-Path -LiteralPath $_ }
+  $sourceRoot = Join-Path $Root 'src'
+  if (Test-Path -LiteralPath $sourceRoot) {
+    $inputs += Get-ChildItem -LiteralPath $sourceRoot -Recurse -File | Select-Object -ExpandProperty FullName
+  }
+
+  $artifactTime = (Get-Item -LiteralPath $artifact).LastWriteTimeUtc
+  return $null -ne ($inputs | Where-Object {
+    (Get-Item -LiteralPath $_).LastWriteTimeUtc -gt $artifactTime
+  } | Select-Object -First 1)
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = (Resolve-Path (Join-Path $scriptDir '..\..')).Path
 $gatewayRoot = (Resolve-Path (Join-Path $projectRoot '..\wehook')).Path
@@ -130,8 +150,8 @@ foreach ($requiredFile in $requiredFiles) {
   }
 }
 
-$frontendIndex = Join-Path $frontendRoot 'dist\index.html'
-if (-not (Test-Path -LiteralPath $frontendIndex)) {
+if (Test-FrontendBuildRequired $frontendRoot) {
+  Write-Host 'Frontend source changed; rebuilding the workbench...' -ForegroundColor Cyan
   Push-Location $frontendRoot
   try {
     & npm.cmd run build

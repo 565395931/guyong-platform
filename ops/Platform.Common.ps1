@@ -168,14 +168,23 @@ function Wait-DockerEngine([string]$DockerPath, [int]$TimeoutSeconds = 180) {
   throw "Docker Desktop did not become ready within $TimeoutSeconds seconds. Open Docker Desktop and review its status."
 }
 
+function Resolve-PlatformLanAddress {
+  return Get-NetIPConfiguration -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' } |
+    ForEach-Object { $_.IPv4Address.IPAddress } |
+    Where-Object { $_ -and $_ -notlike '127.*' -and $_ -notlike '169.254.*' } |
+    Select-Object -First 1
+}
+
 function Get-PlatformStatus {
+  $lanAddress = Resolve-PlatformLanAddress
   $definitions = @(
-    [pscustomobject]@{ Name = 'mysql'; Port = 3306; Url = '127.0.0.1:3306' },
-    [pscustomobject]@{ Name = 'redis'; Port = 6379; Url = '127.0.0.1:6379' },
-    [pscustomobject]@{ Name = 'gateway-ws'; Port = 8787; Url = 'ws://127.0.0.1:8787' },
-    [pscustomobject]@{ Name = 'gateway-health'; Port = 8788; Url = 'http://127.0.0.1:8788/healthz' },
-    [pscustomobject]@{ Name = 'backend'; Port = 3001; Url = 'http://127.0.0.1:3001' },
-    [pscustomobject]@{ Name = 'frontend'; Port = 3003; Url = 'http://127.0.0.1:3003' }
+    [pscustomobject]@{ Name = 'mysql'; Port = 3306; LocalUrl = '127.0.0.1:3306'; LanUrl = '' },
+    [pscustomobject]@{ Name = 'redis'; Port = 6379; LocalUrl = '127.0.0.1:6379'; LanUrl = '' },
+    [pscustomobject]@{ Name = 'gateway-ws'; Port = 8787; LocalUrl = 'ws://127.0.0.1:8787'; LanUrl = '' },
+    [pscustomobject]@{ Name = 'gateway-health'; Port = 8788; LocalUrl = 'http://127.0.0.1:8788/healthz'; LanUrl = '' },
+    [pscustomobject]@{ Name = 'backend'; Port = 3001; LocalUrl = 'http://127.0.0.1:3001'; LanUrl = if ($lanAddress) { "http://${lanAddress}:3001" } else { '' } },
+    [pscustomobject]@{ Name = 'frontend'; Port = 3003; LocalUrl = 'http://127.0.0.1:3003'; LanUrl = if ($lanAddress) { "http://${lanAddress}:3003" } else { '' } }
   )
 
   foreach ($definition in $definitions) {
@@ -186,7 +195,8 @@ function Get-PlatformStatus {
       Port = $definition.Port
       Running = $null -ne $connection
       Pid = if ($connection) { $connection.OwningProcess } else { $null }
-      Url = $definition.Url
+      LocalUrl = $definition.LocalUrl
+      LanUrl = $definition.LanUrl
     }
   }
 }

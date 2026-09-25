@@ -61,6 +61,9 @@ $services = @(
   [pscustomobject]@{
     name = 'gateway'
     host = '127.0.0.1'
+    advertisedHost = '127.0.0.1'
+    localUrl = 'ws://127.0.0.1:8787'
+    lanUrl = ''
     port = 8787
     program = $nodePath
     arguments = @((Quote-Argument (Join-Path $gatewayRoot 'src\index.js')))
@@ -69,6 +72,9 @@ $services = @(
   [pscustomobject]@{
     name = 'backend'
     host = '0.0.0.0'
+    advertisedHost = $FrontendHost
+    localUrl = 'http://127.0.0.1:3001'
+    lanUrl = "http://${FrontendHost}:3001"
     port = 3001
     program = $nodePath
     arguments = @((Quote-Argument (Join-Path $backendRoot 'src\app.js')))
@@ -76,12 +82,15 @@ $services = @(
   },
   [pscustomobject]@{
     name = 'frontend'
-    host = $FrontendHost
+    host = '0.0.0.0'
+    advertisedHost = $FrontendHost
+    localUrl = 'http://127.0.0.1:3003'
+    lanUrl = "http://${FrontendHost}:3003"
     port = 3003
     program = $nodePath
     arguments = @(
       (Quote-Argument (Join-Path $frontendRoot 'node_modules\vite\bin\vite.js')),
-      'preview', '--host', $FrontendHost, '--port', '3003', '--strictPort'
+      'preview', '--host', '0.0.0.0', '--port', '3003', '--strictPort'
     )
     workingDirectory = $frontendRoot
   }
@@ -100,6 +109,7 @@ if ($Status) {
     [pscustomobject]@{
       name = $_.name
       host = $_.host
+      advertisedHost = $_.advertisedHost
       port = $_.port
       running = Test-ListeningPort $_.port
     }
@@ -140,6 +150,8 @@ foreach ($service in $services) {
       name = $service.name
       status = 'already-running'
       host = $service.host
+      localUrl = $service.localUrl
+      lanUrl = $service.lanUrl
       port = $service.port
       pid = (Get-NetTCPConnection -State Listen -LocalPort $service.port |
         Select-Object -First 1 -ExpandProperty OwningProcess)
@@ -179,6 +191,8 @@ foreach ($service in $services) {
     name = $service.name
     status = 'started'
     host = $service.host
+    localUrl = $service.localUrl
+    lanUrl = $service.lanUrl
     port = $service.port
     pid = $process.Id
   }

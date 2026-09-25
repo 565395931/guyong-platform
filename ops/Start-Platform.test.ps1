@@ -39,6 +39,15 @@ if (($plan.LocalPackageBuildOrder -join ',') -ne 'commerce-protocol,commerce-pro
   throw 'The local package build order changed unexpectedly.'
 }
 
+$statusRows = @(Get-PlatformStatus)
+$frontendStatus = $statusRows | Where-Object Name -eq 'frontend'
+if ($frontendStatus.LocalUrl -ne 'http://127.0.0.1:3003') {
+  throw 'Frontend status does not expose the localhost workbench URL.'
+}
+if (-not $frontendStatus.PSObject.Properties['LanUrl']) {
+  throw 'Frontend status does not expose a LAN URL field.'
+}
+
 $startupSource = Get-Content -Raw -LiteralPath $scriptPath
 foreach ($requiredBuildStep in @('Build-LocalNodePackage $paths.CommerceProtocolRoot', 'Build-LocalNodePackage $paths.CommerceProjectionLedgerRoot')) {
   if (-not $startupSource.Contains($requiredBuildStep)) { throw "Missing local package build step: $requiredBuildStep" }

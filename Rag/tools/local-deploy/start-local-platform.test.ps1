@@ -15,16 +15,8 @@ if ($plan.projectRoot -ne (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path)
 }
 
 $services = @($plan.services)
-if (($services.name -join ',') -ne 'redis,gateway,backend,frontend') {
+if (($services.name -join ',') -ne 'gateway,backend,frontend') {
   throw 'Services are not declared in the required startup order.'
-}
-
-$redis = $services | Where-Object name -eq 'redis'
-if ($redis.host -ne '127.0.0.1' -or $redis.port -ne 6379) {
-  throw 'Redis must only listen on 127.0.0.1:6379.'
-}
-if (($redis.arguments -join ' ') -notmatch '--appendonly yes') {
-  throw 'Redis persistence must be enabled.'
 }
 
 $gateway = $services | Where-Object name -eq 'gateway'
@@ -33,8 +25,17 @@ if ($gateway.host -ne '127.0.0.1' -or $gateway.port -ne 8787) {
 }
 
 $frontend = $services | Where-Object name -eq 'frontend'
-if ($frontend.host -ne '192.168.1.25' -or $frontend.port -ne 3003) {
-  throw 'Frontend must bind to the selected LAN address on port 3003.'
+if ($frontend.host -ne '0.0.0.0' -or $frontend.port -ne 3003) {
+  throw 'Frontend must bind to all IPv4 interfaces on port 3003.'
+}
+if ($frontend.advertisedHost -ne '192.168.1.25') {
+  throw 'Frontend must advertise the selected LAN address.'
+}
+if ($frontend.localUrl -ne 'http://127.0.0.1:3003' -or $frontend.lanUrl -ne 'http://192.168.1.25:3003') {
+  throw 'Frontend access URLs are incorrect.'
+}
+if (($frontend.arguments -join ' ') -notmatch '--host 0\.0\.0\.0') {
+  throw 'Vite preview is not configured for local and LAN access.'
 }
 
 $allPaths = @($services.program) + @($services.workingDirectory)

@@ -26,6 +26,8 @@ Redis 同样使用固定位置 `Rag/docker/redis/images/redis-7.4.11-alpine-amd6
 powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 ```
 
+状态表会同时显示 `LocalUrl` 和 `LanUrl`。工作台监听 `0.0.0.0:3003`，因此运行平台的电脑可访问 `http://127.0.0.1:3003`，局域网内其他电脑可访问表格中显示的 `LanUrl`。
+
 只检查启动计划、不启动服务：
 
 ```powershell

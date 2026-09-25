@@ -204,6 +204,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 | MySQL | `127.0.0.1:3306` |
 | Redis | `127.0.0.1:6379` |
 
+工作台监听 `0.0.0.0:3003`：运行平台的电脑使用 `http://127.0.0.1:3003`，同一局域网的其他电脑使用启动完成时显示的 `http://<局域网IP>:3003`。启动结果会同时列出 `LocalUrl` 和 `LanUrl`。
+
 更详细的启动说明见 [`ops/README.md`](ops/README.md)，桌面打包说明见 [`Rag/platform-web/README.desktop.md`](Rag/platform-web/README.desktop.md)。
 
 ## 验证

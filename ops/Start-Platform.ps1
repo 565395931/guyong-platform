@@ -247,6 +247,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Core platform startup failed.' }
 
 Write-Host ''
 Write-Host 'Platform startup completed.' -ForegroundColor Green
-Get-PlatformStatus | Format-Table Name, Running, Port, Pid, Url -AutoSize
+Get-PlatformStatus | Format-Table Name, Running, Port, Pid, LocalUrl, LanUrl -AutoSize
+Write-Host ''
+$lanAddress = Resolve-PlatformLanAddress
+Write-Host 'Workbench entry points:' -ForegroundColor Green
+Write-Host '  This computer: http://127.0.0.1:3003' -ForegroundColor Green
+if ($lanAddress) {
+  Write-Host "  Other LAN computers: http://${lanAddress}:3003" -ForegroundColor Green
+}
 Write-Host ''
 Write-Host "Logs: $($paths.RagRoot)\logs" -ForegroundColor DarkGray

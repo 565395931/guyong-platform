@@ -113,6 +113,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 
 ## 变更记录
 
+### 2026-09-25 — 同时开放本机与局域网工作台入口
+- 改动：Vite 预览服务改为监听 `0.0.0.0:3003`，启动完成和状态命令同时显示本机 `LocalUrl` 与局域网 `LanUrl`，并额外打印两个工作台入口。
+- 位置：`Rag/tools/local-deploy/start-local-platform.ps1`、对应测试、`ops/Platform.Common.ps1`、`ops/Start-Platform.ps1`、`ops/Get-PlatformStatus.ps1`、README。
+- 验证：部署 dry-run、启动 dry-run、PowerShell 语法、状态表双地址输出和 CodeGraph 审查通过。
+- 待办：新电脑拉取后结束旧前端进程并重新启动一次，使新的监听地址生效。
+
 ### 2026-09-25 — 首次启动自动构建本地包
 - 改动：启动器按协议包、投影账本、后端的依赖顺序自动补装并构建本地 TypeScript 包；发现后端已安装副本缺少 `dist/index.js` 时自动刷新依赖并验证产物。
 - 位置：`ops/Platform.Common.ps1`、`ops/Start-Platform.ps1`、`ops/Start-Platform.test.ps1`、`ops/README.md`、`README.md`。

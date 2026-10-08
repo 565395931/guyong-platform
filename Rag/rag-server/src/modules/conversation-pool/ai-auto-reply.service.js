@@ -198,6 +198,32 @@ function buildAiLogExtra(extra = {}) {
 /**
  * 获取 AI 自助回复使用的模型（从配置中心读取，默认 deepseek-v4-flash）
  */
+/**
+ * 桌面桥接账号（抖店本地客户端）——**必须按账号优先判定**。
+ *
+ * 与手动发送（routes/conversations.js）、审核发送（message-review）一致：
+ * 只看渠道会落到官方抖音适配器，它固定返回"开放平台未提供客服消息 API"，
+ * AI 回复就永远发不出去（实测：审核通过的回复也发不出去，同一个坑）。
+ */
+async function getDesktopBridgeAdapter(message) {
+  const accountId = Number(message.accountId)
+  if (!Number.isInteger(accountId) || accountId <= 0) return null
+  try {
+    const { sequelize } = require('../../config/database')
+    const { QueryTypes } = require('sequelize')
+    const rows = await sequelize.query(
+      'SELECT adapter_type FROM channel_accounts WHERE id = :accountId',
+      { replacements: { accountId }, type: QueryTypes.SELECT }
+    )
+    if (!rows[0] || rows[0].adapter_type !== 'desktop_bridge') return null
+    const { getAdapter } = require('../channel-adapters')
+    return getAdapter('desktop_bridge') || null
+  } catch (err) {
+    console.error('[AiAutoReply] 判定桌面桥接账号失败:', err.message)
+    return null
+  }
+}
+
 async function getAiSelfReplyModel() {
   try {
     const configService = require('../../services/configService')
@@ -389,11 +415,23 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
         messageType: 'text',
         content: { text: guardedReplyText }
       }
-      if (dispatcher) {
+      const bridgeAdapter = await getDesktopBridgeAdapter(message)
+      if (bridgeAdapter) {
+        const sendResult = await bridgeAdapter.sendMessage(
+          message.accountId,
+          message.channelUserId || message.userId,
+          { content: { text: guardedReplyText }, messageType: 'text', localMessageId: cloudPayload.localMessageId }
+        )
+        if (!sendResult.success) {
+          console.error('[AiAutoReply] 桌面桥接发送失败:', sendResult.error)
+          await messagingService.sendAiReply({ id: cloudPayload.localMessageId, conversationId, content: { text: guardedReplyText }, messageType: 'text', sendStatus: 'failed' }, eventEmitter)
+          return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
+        }
+      } else if (dispatcher) {
         const sendResult = await dispatcher.dispatch(cloudPayload)
         if (!sendResult.success) {
           console.error('[AiAutoReply] 统一出站分发失败:', sendResult.error)
-          await messagingService.sendAiReply({ id: cloudPayload.localMessageId, conversationId, content: { text: guardedReplyText }, messageType: 'text' }, eventEmitter)
+          await messagingService.sendAiReply({ id: cloudPayload.localMessageId, conversationId, content: { text: guardedReplyText }, messageType: 'text', sendStatus: 'failed' }, eventEmitter)
           return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
         }
       } else if (adapter && message.channel === 'whatsapp') {
@@ -405,7 +443,9 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
             id: cloudPayload.localMessageId,
             conversationId,
             content: { text: guardedReplyText },
-            messageType: 'text'
+            messageType: 'text',
+            // 发送失败：如实记 failed，否则坐席看到假的绿勾（与手动发送对齐）
+            sendStatus: 'failed'
           }, eventEmitter)
           return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
         }
@@ -501,11 +541,23 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
       messageType: 'text',
       content: { text: guardedReplyText }
     }
-    if (dispatcher) {
+    const bridgeAdapter = await getDesktopBridgeAdapter(message)
+    if (bridgeAdapter) {
+      const sendResult = await bridgeAdapter.sendMessage(
+        message.accountId,
+        message.channelUserId || message.userId,
+        { content: { text: guardedReplyText }, messageType: 'text', localMessageId: cloudPayload.localMessageId }
+      )
+      if (!sendResult.success) {
+        console.error('[AiAutoReply] 桌面桥接发送失败:', sendResult.error)
+        await messagingService.sendAiReply({ id: cloudPayload.localMessageId, conversationId, content: { text: guardedReplyText }, messageType: 'text', sendStatus: 'failed' }, eventEmitter)
+        return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
+      }
+    } else if (dispatcher) {
       const sendResult = await dispatcher.dispatch(cloudPayload)
       if (!sendResult.success) {
         console.error('[AiAutoReply] 统一出站分发失败:', sendResult.error)
-        await messagingService.sendAiReply({ id: cloudPayload.localMessageId, conversationId, content: { text: guardedReplyText }, messageType: 'text' }, eventEmitter)
+        await messagingService.sendAiReply({ id: cloudPayload.localMessageId, conversationId, content: { text: guardedReplyText }, messageType: 'text', sendStatus: 'failed' }, eventEmitter)
         return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
       }
     } else if (adapter && message.channel === 'whatsapp') {
@@ -517,7 +569,9 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
           id: cloudPayload.localMessageId,
           conversationId,
           content: { text: guardedReplyText },
-          messageType: 'text'
+          messageType: 'text',
+          // 发送失败：如实记 failed，否则坐席看到假的绿勾（与手动发送对齐）
+          sendStatus: 'failed'
         }, eventEmitter)
         return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
       }

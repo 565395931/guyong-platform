@@ -1,1 +1,7 @@
 1.启动需要docker mysql redis
+2.「今日配额」到底是什么：它跟客服自动回复**无关**，唯一会消耗它的是促销活动模块（modules/campaigns，即批量私信/评论承接/关键词触发这类主动群发）。更麻烦的是 daily_quota 在后端**没有任何重置逻辑**（搜不到 daily_quota=0，也没有定时任务），所以名字叫"今日"、实际是终身累计，一旦累到 max_daily_quota 就永久封顶，第二天不会恢复。另外桌面桥接账号根本用不到它——bridgeCommerceAdapter.sendMessage() 是硬编码恒返回 bridge_required 的。2026-09-25 已在 UI 移除该列与建号表单字段，但后端模型和活动逻辑仍保留。
+3.encrypt() 用固定 IV：shared/utils/encrypt.js 的 IV 是硬编码常量而非每条随机，同样的明文加密出的密文完全一致，可被比对推断。渠道账号的 App Secret 正是存在这个加密字段里。换算法要兼容存量数据，属于要单独排期的改动。
+4.飞鸽（抖店工作台）UI 自动化必须附加到子窗口 Chrome_RenderWidgetHostHWND，附加到顶层 Chrome_WidgetWin_1 只能拿到空树（7 节点 vs 630 节点）。窗口被其它窗口遮挡不影响读取，不需要前台；但**最小化或隐藏时读不到**。
+5.PowerShell 5.1 读取没有 BOM 的 .ps1 会按 ANSI 解码：中文路径会被破坏（E:\平台建设 变成 E:\骞冲彴寤鸿，node 报 MODULE_NOT_FOUND），注释里的中文还会吞掉后面的引号导致语法解析错误。这类脚本要么存成带 BOM 的 UTF-8，要么保持纯 ASCII、把路径从参数传入。
+6.Get-NetTCPConnection 在全新 PowerShell 会话里**首次调用可能返回空**，用它判断"端口有没有被占用"会漏判——表现为误以为没有监听者、于是不去杀旧进程，旧服务继续跑却以为重启成功了。改用解析 netstat 的输出。
+7.后端是 node src/app.js 启动、**没有热重载**，改完代码必须重启才生效。且新接口无法靠探活验证是否已加载：router.use() 的鉴权中间件在路由匹配之前拦截，任何 /api/v1/channel-accounts/* 路径（包括根本不存在的）都返回 401。

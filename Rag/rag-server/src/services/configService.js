@@ -66,6 +66,13 @@ const DEFAULTS = {
   // qwen3.7-plus/qwen3.6-flash 是 Qwen3 系列最新版（支持混合思考模式）
   // deepseek-v4-pro/deepseek-v4-flash 是 DeepSeek 阿里云直供版
   // 默认统一使用 deepseek-v4-flash（兼顾速度、成本与推理能力）
+  // 接口与百炼应用标识：默认留空 = 回退 .env / 内置默认（services/aiSettings.js 负责兜底）
+  ai_chat_base_url: '',
+  ai_chat_model: '',
+  ai_suggestion_enabled: false,
+  bailian_workspace_id: '',
+  bailian_index_id: '',
+  bailian_category_id: '',
   ai_self_reply_model: 'deepseek-v4-flash',
   ai_suggest_model: 'deepseek-v4-flash',
   llm_translate_model: 'deepseek-v4-flash',

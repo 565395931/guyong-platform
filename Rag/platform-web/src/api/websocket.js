@@ -36,6 +36,15 @@ const safeParseJSON = (str) => {
 // 空字符串表示同源连接（通过 /socket.io 代理）
 const WS_URL = runtimeConfig.wsUrl
 
+// 会话归属变化时"可以跟过去"的 Tab —— 必须与 ConversationList 里真实存在的 Tab 一致。
+// public / long_term 已从界面移除，跟过去只会是一片空白。
+const FOLLOWABLE_TABS = new Set(['pending_human', 'ai_self', 'private', 'archived'])
+
+// 有些事件只带 type、不带 toPool（归档走的就是这条：pushService 把它当作
+// POOL_CHANGE 广播到公共池房间，payload 里只有 type='archived'），
+// 这时按事件类型推出目标 Tab，否则 Tab 不会跟随。
+const TAB_BY_EVENT_TYPE = { archived: 'archived' }
+
 class WebSocketService {
   constructor() {
     this.socket = null
@@ -348,6 +357,13 @@ class WebSocketService {
     // 如果有完整会话数据，用 upsert（新会话也能插入）
     if (data.id) {
       const isCurrentConversation = convStore.current?.id === data.id
+      // 归档/复活走的是 conversation_update（不带 pool_type），目标栏按 conv_status / type 判。
+      if (isCurrentConversation) {
+        const targetTab = (data.conv_status === 'archived' || data.type === 'archived')
+          ? 'archived'
+          : this._getConversationTab(data)
+        this._followConversationTab(convStore, targetTab)
+      }
       if (this._shouldShowInActiveTab(convStore, data)) {
         convStore.upsertConversation(data.id, data)
       } else if (!isCurrentConversation) {
@@ -388,13 +404,22 @@ class WebSocketService {
       }
 
       const currentTab = convStore.activePoolTab
+      // 会话归属一变就跟着走：AI 池被认领成 private（发送前的 ensureClaimedForReply、
+      // 抢单）、转回 AI 池、归档……会话换到哪一栏，左侧 Tab 就切到哪一栏，
+      // 用户不用自己去那一栏里找。不跟的话会话会从当前列表里消失。
+      // 只对**当前正在查看**的会话生效——别的会话的池变更不该把用户的 Tab 拽走。
+      const nextTab = (conversation && this._getConversationTab(conversation))
+        || toPool
+        || TAB_BY_EVENT_TYPE[data.type]
+      if (isCurrentConversation) this._followConversationTab(convStore, nextTab)
+      const activeTab = convStore.activePoolTab
       const shouldShowInCurrentTab = conversation
         ? this._shouldShowInActiveTab(convStore, conversation)
-        : currentTab === 'all' || (toPool && toPool === currentTab)
+        : activeTab === 'all' || (toPool && toPool === activeTab)
 
       if (conversation && shouldShowInCurrentTab) {
         convStore.upsertConversation(convId, conversation)
-      } else if (!isCurrentConversation && currentTab !== 'all' && toPool && toPool !== currentTab) {
+      } else if (!isCurrentConversation && activeTab !== 'all' && toPool && toPool !== activeTab) {
         // 移出当前 Tab 时只从列表移除，不关闭右侧正在查看的会话
         convStore.removeConversation(convId, { preserveCurrent: true })
       } else if (conversation && !isCurrentConversation) {
@@ -417,7 +442,25 @@ class WebSocketService {
     const currentTab = convStore.activePoolTab
     if (currentTab === 'all') return true
     const conversationTab = this._getConversationTab(conversation)
+    // 「我的」额外收录归档会话（归档不改 pool_type/claimed_by，认领关系仍在），
+    // 与后端列表查询的归档豁免保持一致，否则池变更时会把这条从「我的」里删掉。
+    if (currentTab === 'private' && conversation?.conv_status === 'archived') return true
     return Boolean(conversationTab && conversationTab === currentTab)
+  }
+
+  /**
+   * 当前正在查看的会话换了归属，就把左侧 Tab 跟着切过去。
+   *
+   * 不跟的话会话会从列表里"消失"，用户得自己逐个 Tab 去找（实测反馈：
+   * 在 AI 自助里回复后会话被认领成「我的」，用户找不到它）。
+   *
+   * @returns {boolean} 是否发生了切换
+   */
+  _followConversationTab(convStore, targetTab) {
+    if (!targetTab || !FOLLOWABLE_TABS.has(targetTab)) return false
+    if (convStore.activePoolTab === targetTab) return false
+    convStore.setPoolTab(targetTab)
+    return true
   }
 
   _getConversationTab(conversation) {

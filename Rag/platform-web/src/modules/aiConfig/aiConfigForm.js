@@ -17,7 +17,15 @@ export const AI_CONFIG_FIELDS = Object.freeze([
   { key: 'ai_suggest_concurrency', group: 'runtime', label: '建议生成并发数', type: 'number', min: 1, max: 20, step: 1 },
   { key: 'llm_context_message_count', group: 'runtime', label: '回复上下文条数', type: 'number', min: 0, max: 100, step: 1 },
   { key: 'rag_context_message_count', group: 'runtime', label: 'RAG 上下文条数', type: 'number', min: 0, max: 20, step: 1 },
-  { key: 'translation_context_message_count', group: 'runtime', label: '翻译上下文条数', type: 'number', min: 0, max: 10, step: 1 }
+  { key: 'translation_context_message_count', group: 'runtime', label: '翻译上下文条数', type: 'number', min: 0, max: 10, step: 1 },
+  // 接口与默认模型：原先只能在 .env 里改，而且代码加载时读死，不重启不生效
+  { key: 'ai_chat_base_url', group: 'provider', label: '大模型接口地址（OpenAI 兼容）', type: 'text', placeholder: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+  { key: 'ai_chat_model', group: 'provider', label: '默认模型', type: 'model' },
+  { key: 'ai_suggestion_enabled', group: 'provider', label: 'AI 推荐回答', type: 'boolean' },
+  // 百炼（阿里云 DashScope）应用标识：知识库上传/解析用；AccessKey 在下方单独加密保存
+  { key: 'bailian_workspace_id', group: 'bailian', label: '百炼 workspaceId', type: 'text' },
+  { key: 'bailian_index_id', group: 'bailian', label: '百炼 indexId（知识库）', type: 'text' },
+  { key: 'bailian_category_id', group: 'bailian', label: '百炼 categoryId（类目）', type: 'text' }
 ])
 
 export function normalizeAiConfig(config = {}) {

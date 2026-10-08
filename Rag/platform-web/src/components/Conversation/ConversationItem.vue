@@ -29,8 +29,14 @@
       <div class="conversation-item__footer">
         <!-- 渠道标签 -->
         <el-tag size="small" :type="channelTagType(conversation.channel)" effect="plain">{{ channelLabel(conversation.channel) }}</el-tag>
-        <!-- 池类型标签 -->
-        <el-tag size="small" :type="poolTagType(conversation.pool_type)" effect="dark" class="conversation-item__pool-tag">
+        <!-- 池类型标签（AI 自助池不显示"AI自助"字样，池本身保留） -->
+        <el-tag
+          v-if="conversation.pool_type && conversation.pool_type !== 'ai_self'"
+          size="small"
+          :type="poolTagType(conversation.pool_type)"
+          effect="dark"
+          class="conversation-item__pool-tag"
+        >
           {{ poolLabel(conversation.pool_type) }}
         </el-tag>
         <!-- 会话状态 -->
@@ -62,11 +68,6 @@
         <span v-if="waitDuration" class="conversation-item__wait">
           等待 {{ waitDuration }}
         </span>
-      </div>
-
-      <!-- AI自助池：客户不知情提示 -->
-      <div v-if="conversation.pool_type === 'ai_self'" class="conversation-item__ai-notice">
-        客户不知情是AI，接管后请自然承接
       </div>
 
       <!-- 操作按钮区域 -->

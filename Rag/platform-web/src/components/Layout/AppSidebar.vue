@@ -43,12 +43,24 @@
                   v-for="nested in child.children"
                   :key="nested.path"
                   class="app-sidebar__nested-item"
-                  :class="{ 'is-active': isNestedRoute(nested.path) }"
+                  :class="{
+                    'is-active': isNestedRoute(nested.path),
+                    'app-sidebar__nested-item--alert': isChannelAbnormalFor(nested.path)
+                  }"
                   :index="nested.path"
                   :title="sidebarCollapsed ? nested.label : ''"
                 >
                   <el-icon><component :is="iconComponents[nested.icon]" /></el-icon>
-                  <template #title><span class="app-sidebar__item-label">{{ nested.label }}</span></template>
+                  <template #title>
+                    <span class="app-sidebar__item-label">{{ nested.label }}</span>
+                    <!-- 待人工数量：直接挂在「抖店」这类渠道条目右边 -->
+                    <el-badge
+                      v-if="child.key === 'platform-messages' && pendingCountFor(nested.path) > 0"
+                      class="app-sidebar__pending-badge"
+                      :value="pendingCountFor(nested.path)"
+                      type="danger"
+                    />
+                  </template>
                 </el-menu-item>
               </template>
               <el-menu-item
@@ -113,7 +125,9 @@ import {
 } from '@element-plus/icons-vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useUserStore } from '@/stores/user'
+import { useConversationStore } from '@/stores/conversation'
 import { buildSidebarMenu } from '@/modules/navigation/channelNavigation'
+import { useChannelHealth } from '@/modules/channels/channelHealth'
 import { createReviewCounter, formatReviewCount } from '@/modules/navigation/reviewCount'
 import { getReviewStats } from '@/api/messageReviews'
 import { websocketService } from '@/api/websocket'
@@ -132,10 +146,14 @@ onMounted(() => {
   syncMobile(mobileQuery)
   mobileQuery.addEventListener('change', syncMobile)
   reviewCounter.start()
+  channelHealth.startPolling()
+  // 池统计里包含"按渠道的待人工数量"，进入时拉一次；之后由 WebSocket 的 pool_stats_update 刷新
+  conversationStore.fetchPoolStats()
 })
 onBeforeUnmount(() => {
   mobileQuery.removeEventListener('change', syncMobile)
   reviewCounter.stop()
+  channelHealth.stopPolling()
 })
 const sidebarCollapsed = computed(() => settingsStore.sidebarCollapsed && !isMobile.value)
 const expandedKeys = ref(new Set())
@@ -154,6 +172,27 @@ const isNestedRoute = target => {
   const routeChannel = String(route.query.channel || 'all')
   return targetChannel === routeChannel
 }
+
+// ========== 渠道待人工数量 + 渠道异常提醒 ==========
+const conversationStore = useConversationStore()
+const channelHealth = useChannelHealth()
+
+/** 从菜单路径里取渠道标识（形如 /platform-messages?channel=douyin）。 */
+const channelOfMenuPath = target => {
+  const [, search = ''] = String(target || '').split('?')
+  const channel = new URLSearchParams(search).get('channel')
+  return channel && channel !== 'all' ? channel : null
+}
+
+/** 该渠道当前待人工的会话数（左侧红点数字）。 */
+const pendingCountFor = target => {
+  const channel = channelOfMenuPath(target)
+  if (!channel) return 0
+  return Number(conversationStore.poolStats?.pendingByChannel?.[channel] || 0)
+}
+
+/** 该渠道是否连不上（连不上就让这个条目闪红光）。 */
+const isChannelAbnormalFor = target => channelHealth.isChannelAbnormal(channelOfMenuPath(target))
 const expandForRoute = path => {
   const next = new Set(expandedKeys.value)
   if (path === '/platform-messages') next.add('platform-messages')
@@ -324,9 +363,28 @@ const menuItems = computed(() => buildSidebarMenu(userStore.userInfo?.role))
 
   &__nested-item { padding-left: 48px !important; }
 
+  // 渠道连不上时整条闪红光（抖店这类本地客户端账号掉线时最需要一眼看到）
+  &__nested-item--alert {
+    animation: app-sidebar-channel-alert 1.2s ease-in-out infinite;
+
+    :deep(.app-sidebar__item-label) { color: #fca5a5; }
+  }
+
   &__item-label {
     flex: 1;
     min-width: 0;
+  }
+
+  &__pending-badge {
+    flex-shrink: 0;
+    margin-left: auto;
+
+    :deep(.el-badge__content) {
+      position: static;
+      transform: none;
+      border: 0;
+      background: #ef4444;
+    }
   }
 
   &__review-badge {
@@ -414,6 +472,18 @@ const menuItems = computed(() => buildSidebarMenu(userStore.userInfo?.role))
       .app-sidebar__nested-arrow { display: none; }
       button { justify-content: center; }
     }
+  }
+}
+
+/* 渠道异常：红光呼吸 + 描边，避免只靠颜色（色觉差异也能看出变化） */
+@keyframes app-sidebar-channel-alert {
+  0%, 100% {
+    background: rgba(239, 68, 68, 0.06);
+    box-shadow: inset 3px 0 0 0 rgba(239, 68, 68, 0.55);
+  }
+  50% {
+    background: rgba(239, 68, 68, 0.26);
+    box-shadow: inset 3px 0 0 0 rgba(239, 68, 68, 1);
   }
 }
 </style>

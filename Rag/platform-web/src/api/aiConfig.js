@@ -14,3 +14,8 @@ export const clearAiProviderCredential = () => request.delete('/v1/conversations
 export const testAiProvider = apiKey => request.post('/v1/conversations/ai-provider/test', apiKey ? { apiKey } : {})
 export const syncAiProviderModels = () => request.post('/v1/conversations/ai-provider/models/sync')
 export const getAiProviderBalance = () => request.get('/v1/conversations/ai-provider/balance')
+
+// 百炼（阿里云）应用凭据：密文存后端，接口只回掩码
+export const getBailianCredential = () => request.get('/v1/conversations/bailian-credential')
+export const saveBailianCredential = payload => request.put('/v1/conversations/bailian-credential', payload)
+export const clearBailianCredential = () => request.delete('/v1/conversations/bailian-credential')

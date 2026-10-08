@@ -207,6 +207,116 @@ function createBridgeRepository(sequelize, { now = () => new Date(), randomBytes
       return rows[0] || null
     },
 
+    /**
+     * 同机节点免配对码登记。
+     *
+     * 配对码（consumePairing）是为"另一台电脑上的节点"设计的：人在网页上生成码，
+     * 再去那台机器输入。而后端与飞鸽客户端同机时没有这个第二设备，配对码纯属多余
+     * 的一步，所以这里直接签发节点凭据。
+     *
+     * 以 machine_fingerprint_hash 做幂等：同一台机器重复登记会复用同一个节点
+     * （node_key 不变）并轮换 enrollment token，不会堆积重复节点。
+     */
+    async provisionNode({
+      machineFingerprint,
+      displayName,
+      version,
+      adapterIds = [],
+      capabilities = {},
+      actorId = null
+    } = {}) {
+      if (!machineFingerprint || typeof machineFingerprint !== 'string') {
+        throw new BridgeDomainError('PROVISION_INVALID_FINGERPRINT', 'machineFingerprint is required')
+      }
+      if (!version || typeof version !== 'string') {
+        throw new BridgeDomainError('PROVISION_INVALID_VERSION', 'version is required')
+      }
+
+      const fingerprintHash = hashSecret(machineFingerprint)
+      return sequelize.transaction(async transaction => {
+        const existingNodes = await sequelize.query(
+          'SELECT * FROM desktop_bridge_nodes WHERE machine_fingerprint_hash = :fingerprintHash FOR UPDATE',
+          { replacements: { fingerprintHash }, type: QueryTypes.SELECT, transaction }
+        )
+        const existing = existingNodes[0]
+        const enrollmentToken = randomBytes(32).toString('base64url')
+        const enrollmentTokenHash = hashSecret(enrollmentToken)
+        const allowedAdapterIds = JSON.stringify(adapterIds)
+        const capabilitiesJson = JSON.stringify(capabilities)
+        let nodeId
+        let nodeKey
+        let rotated = false
+
+        if (existing) {
+          nodeId = existing.id
+          nodeKey = existing.node_key
+          rotated = true
+          await sequelize.query(
+            `UPDATE desktop_bridge_nodes
+             SET display_name = :displayName, enrollment_token_hash = :enrollmentTokenHash,
+                 agent_version = :version, allowed_adapter_ids = :allowedAdapterIds,
+                 capabilities = :capabilities, status = 'offline', disabled_at = NULL,
+                 updated_at = NOW(3)
+             WHERE id = :nodeId`,
+            {
+              replacements: {
+                nodeId,
+                displayName: displayName || existing.display_name,
+                enrollmentTokenHash,
+                version,
+                allowedAdapterIds,
+                capabilities: capabilitiesJson
+              },
+              transaction
+            }
+          )
+        } else {
+          nodeKey = randomUUID()
+          await sequelize.query(
+            `INSERT INTO desktop_bridge_nodes
+               (node_key, display_name, machine_fingerprint_hash, enrollment_token_hash,
+                agent_version, allowed_adapter_ids, capabilities, status, created_at, updated_at)
+             VALUES (:nodeKey, :displayName, :fingerprintHash, :enrollmentTokenHash,
+                     :version, :allowedAdapterIds, :capabilities, 'offline', NOW(3), NOW(3))`,
+            {
+              replacements: {
+                nodeKey,
+                displayName: displayName || 'local-node',
+                fingerprintHash,
+                enrollmentTokenHash,
+                version,
+                allowedAdapterIds,
+                capabilities: capabilitiesJson
+              },
+              transaction
+            }
+          )
+          const rows = await sequelize.query(
+            'SELECT id FROM desktop_bridge_nodes WHERE node_key = :nodeKey',
+            { replacements: { nodeKey }, type: QueryTypes.SELECT, transaction }
+          )
+          nodeId = rows[0].id
+        }
+
+        await sequelize.query(
+          `INSERT INTO desktop_bridge_audit_logs
+             (node_id, actor_kind, actor_id, action, target_kind, target_id, outcome, created_at)
+           VALUES (:nodeId, :actorKind, :actorId, :action, 'node', :nodeId, 'success', NOW(3))`,
+          {
+            replacements: {
+              nodeId,
+              actorKind: actorId ? 'user' : 'system',
+              actorId: actorId ? String(actorId) : null,
+              action: rotated ? 'node.provision.rotate' : 'node.provision'
+            },
+            transaction
+          }
+        )
+
+        return { nodeId, nodeKey, enrollmentToken, rotated }
+      })
+    },
+
     async touchNode(nodeId, { version, capabilities, status = 'online' } = {}) {
       await sequelize.query(
         `UPDATE desktop_bridge_nodes
@@ -276,6 +386,76 @@ function createBridgeRepository(sequelize, { now = () => new Date(), randomBytes
           )
         })
       })
+    },
+
+    /**
+     * 写入账号↔节点的绑定。这是 leaseService.assertBinding 的前置条件——
+     * 没有启用状态的绑定行，acquire 一定抛 ACCOUNT_NOT_BOUND。
+     *
+     * `desktop_bridge_bindings.channel_account_id` 上有唯一键，因此用
+     * ON DUPLICATE KEY UPDATE 做幂等（重复调用不会产生第二行）。
+     */
+    async upsertBinding({
+      channelAccountId,
+      adapterId,
+      mode = 'desktop_bridge',
+      enabled = 1,
+      preferredNodeId = null,
+      aiMode = 'auto',
+      actorId = null,
+      transaction = null
+    } = {}) {
+      const accountId = Number(channelAccountId)
+      if (!Number.isInteger(accountId) || accountId <= 0) {
+        throw new BridgeDomainError('BINDING_INVALID_ACCOUNT', 'channelAccountId must be a positive integer')
+      }
+      const normalizedAdapter = typeof adapterId === 'string' ? adapterId.trim() : ''
+      if (!normalizedAdapter) {
+        throw new BridgeDomainError('BINDING_INVALID_ADAPTER', 'adapterId is required for a bridge binding')
+      }
+      const allowedModes = ['desktop_bridge', 'official_api', 'cloud_gateway']
+      if (!allowedModes.includes(mode)) {
+        throw new BridgeDomainError('BINDING_INVALID_MODE', `mode must be one of ${allowedModes.join(', ')}`)
+      }
+
+      const run = async tx => {
+        await sequelize.query(
+          `INSERT INTO desktop_bridge_bindings
+             (channel_account_id, preferred_node_id, adapter_id, mode, ai_mode, enabled,
+              created_by, updated_by, created_at, updated_at)
+           VALUES (:accountId, :preferredNodeId, :adapterId, :mode, :aiMode, :enabled,
+                   :actorId, :actorId, NOW(3), NOW(3))
+           ON DUPLICATE KEY UPDATE
+             preferred_node_id = VALUES(preferred_node_id),
+             adapter_id = VALUES(adapter_id),
+             mode = VALUES(mode),
+             ai_mode = VALUES(ai_mode),
+             enabled = VALUES(enabled),
+             updated_by = VALUES(updated_by),
+             updated_at = NOW(3)`,
+          {
+            replacements: {
+              accountId,
+              preferredNodeId: preferredNodeId === null || preferredNodeId === undefined
+                ? null
+                : Number(preferredNodeId),
+              adapterId: normalizedAdapter,
+              mode,
+              aiMode,
+              enabled: enabled ? 1 : 0,
+              actorId
+            },
+            transaction: tx
+          }
+        )
+        const rows = await sequelize.query(
+          'SELECT * FROM desktop_bridge_bindings WHERE channel_account_id = :accountId',
+          { replacements: { accountId }, type: QueryTypes.SELECT, transaction: tx }
+        )
+        return mapBinding(rows[0])
+      }
+
+      return transaction ? run(transaction) : sequelize.transaction(run)
     }
   }
 }

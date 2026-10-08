@@ -5,7 +5,13 @@
         <span class="chat-window__name">{{ displayName }}</span>
         <el-tag v-if="isGroupConversation" size="small" type="success" effect="plain">群聊</el-tag>
         <el-tag size="small" type="info" effect="plain">{{ channelLabel(conversation.channel) }}</el-tag>
-        <el-tag size="small" :type="poolTagType(conversation.pool_type)" effect="dark">
+        <!-- 池标签：AI 自助池不再显示"AI自助"字样（池本身保留，只是不打标签） -->
+        <el-tag
+          v-if="conversation.pool_type && conversation.pool_type !== 'ai_self'"
+          size="small"
+          :type="poolTagType(conversation.pool_type)"
+          effect="dark"
+        >
           {{ poolLabel(conversation.pool_type) }}
         </el-tag>
         <el-tag v-if="conversation.conv_status" size="small" :type="statusTagType(conversation.conv_status)" effect="plain">
@@ -16,10 +22,6 @@
           size="small" type="warning" effect="dark">
           AI已服务{{ conversation.ai_reply_count }}轮
         </el-tag>
-        <!-- 客户不知情提示 -->
-        <span v-if="conversation.pool_type === 'ai_self'" class="chat-window__ai-notice">
-          客户不知情是AI，接管后请自然承接话术
-        </span>
         <div class="chat-window__actions">
           <!-- 拉取历史按钮 -->
           <el-button
@@ -81,9 +83,10 @@
           </div>
           <MessageBubble
             v-for="msg in messages"
-            :key="msg.id"
+            :key="messageRenderKey(msg)"
             :message="msg"
             @adopt="handleAdopt"
+            @retry="handleRetry"
           />
           <div v-if="showAiReplying" class="chat-window__ai-replying">
             <span class="chat-window__ai-replying-text">AI 正在回复中</span>
@@ -205,6 +208,10 @@ const normalizeMessage = (rawMsg) => {
     transcriptionStatus: msgContent?.transcriptionStatus || rawMsg.transcriptionStatus || '',
     timestamp,
     sendStatus: rawMsg.sendStatus || 'sent',
+    // 发送失败后"重试"要原样重发，这里保留当时的请求负载。
+    // 只按气泡显示的正文重发是不够的——媒体消息的 fileUrl/mimeType/mediaFileId
+    // 不在正文里，重发会退化成一条纯文本。
+    retryPayload: rawMsg.retryPayload || null,
     channelMsgId: rawMsg.channelMsgId || rawMsg.channelMessageId || null,
     // 翻译相关字段：新结构中 text=原文，translatedText=译文
     translated: msgContent?.translated || rawMsg.translated || false,
@@ -223,6 +230,21 @@ const getMessageKey = (msg) => {
   return ''
 }
 
+/**
+ * 渲染用的稳定 key：**优先 clientId**。
+ *
+ * 发送成功时 handleSend 会把临时消息合并成服务端真实 id，而 getMessageKey
+ * 在合并前后会从 `client:` 变成 `id:`，导致组件被卸载重建——重建出来的实例
+ * 一挂载就已是 sent，"发送中 → 绿勾"的状态跃迁根本不会发生，绿勾自然不显示。
+ * 用 clientId 做 key 可以让这条气泡自始至终是同一个实例。
+ */
+const messageRenderKey = (msg) => {
+  if (!msg) return ''
+  if (msg.clientId) return `client:${msg.clientId}`
+  if (msg.id) return `id:${msg.id}`
+  return ''
+}
+
 const isSameOutgoingTempMessage = (existing, incoming) => {
   if (!existing?.id?.toString().startsWith('temp_')) return false
   if (existing.direction !== 'outbound' || incoming.direction !== 'outbound') return false
@@ -237,6 +259,7 @@ const mergeMessage = (oldMsg, newMsg) => ({
   id: newMsg.id || oldMsg.id,
   clientId: newMsg.clientId || oldMsg.clientId,
   sendStatus: newMsg.sendStatus || oldMsg.sendStatus,
+  retryPayload: newMsg.retryPayload || oldMsg.retryPayload,
   channelMsgId: newMsg.channelMsgId || oldMsg.channelMsgId
 })
 
@@ -301,6 +324,25 @@ const scrollToBottom = () => {
       }
     })
   })
+}
+
+/**
+ * 刚发出的消息该用哪个时间戳 —— **必须保证它排在最后一条之后**。
+ *
+ * 踩过的坑：直接用 `Date.now()` 会让刚发的消息插到历史消息**中间**，用户在当前
+ * 滚动位置根本看不到它，表现成"点发送没反应，要重新点一次会话才出现"。
+ * 原因在时间基准不一致：历史消息来自服务端，`created_at` 因
+ * `config/database.js` 的 `timezone: '+00:00'` 被当作 UTC 读取、再由前端转成
+ * 本地时间，整体偏到 8 小时之后；而 `Date.now()` 是真实本地时间，比这些历史
+ * 值都小，于是"最新"的消息按时间排序反而落在中间。
+ *
+ * 所以用"最后一条消息 + 1 毫秒"兜底。等服务端把自己的时间戳回传时，那个值本来
+ * 就比历史值新，位置不会跳动。
+ */
+const nextOutboundTimestamp = () => {
+  const last = messages.value[messages.value.length - 1]
+  const now = Date.now()
+  return last && last.timestamp >= now ? last.timestamp + 1 : now
 }
 
 const loadMessages = async (conv) => {
@@ -594,13 +636,14 @@ const handleRelease = async () => {
   if (!props.conversation?.id) return
   try {
     await ElMessageBox.confirm(
-      '释放后该会话将回到公共池，其他坐席可认领。',
-      '确认释放',
-      { type: 'warning', confirmButtonText: '确认释放', cancelButtonText: '取消' }
+      '释放后该会话将直接进入归档（本系统当前不使用公共池）。',
+      '确认归档',
+      { type: 'warning', confirmButtonText: '确认归档', cancelButtonText: '取消' }
     )
-    const res = await releaseConversation(props.conversation.id)
+    // 释放改为归档：公共池已从界面移除，会话没有可去的地方
+    const res = await archiveConversation(props.conversation.id)
     if (res.success !== false) {
-      ElMessage.success('已释放到公共池')
+      ElMessage.success('已归档')
       conversationStore.removeConversation(props.conversation.id)
       conversationStore.fetchPoolStats()
       conversationStore.fetchSeatLoad()
@@ -724,6 +767,10 @@ const handleSend = async (payload) => {
   sending.value = true
   sendingMode.value = isTranslateSend ? 'translate' : 'send'
   const tempId = 'temp_' + Date.now()
+  const retryPayload = { content, messageType, isTranslateSend }
+  // 整轮发送（乐观占位 → 服务端确认 → 失败）都用同一个时间戳，
+  // 否则状态一变就重新排序、气泡会从底部跳到列表中间。
+  const optimisticTs = nextOutboundTimestamp()
   try {
     // 先在本地追加，保证即时体验；后续 API 返回和 WebSocket 回传都通过 upsert 合并到这条临时消息
     // 翻译并发送要等待服务端返回真实译文，避免先把未发送的中文显示成已发送消息。
@@ -736,8 +783,9 @@ const handleSend = async (payload) => {
         senderType: 'agent',
         content,
         messageType,
-        serverTimestamp: Date.now(),
-        sendStatus: 'sending'
+        serverTimestamp: optimisticTs,
+        sendStatus: 'sending',
+        retryPayload
       })
     }
 
@@ -764,7 +812,10 @@ const handleSend = async (payload) => {
       content: sentContent,
       messageType,
       channelMsgId: res.data?.channelMsgId || null,
-      serverTimestamp: Date.now(),
+      serverTimestamp: optimisticTs,
+      // 桌面桥接的发送是**同步等待节点确认**的（bridgeCommandService 会一直等到
+      // 节点回报状态或 60 秒超时），所以这里的 sendStatus 就是最终结果：
+      // 成功即 sent（绿勾）、失败会走下面的 catch（标红可重试）。
       sendStatus: res.data?.sendStatus || 'sent'
     })
     if (isTranslateSend) {
@@ -786,10 +837,97 @@ const handleSend = async (payload) => {
         senderType: 'agent',
         content,
         messageType,
-        serverTimestamp: Date.now(),
-        sendStatus: 'failed'
+        serverTimestamp: optimisticTs,
+        sendStatus: 'failed',
+        retryPayload
       })
     }
+    ElMessage.error(formatSendError(error))
+  } finally {
+    sending.value = false
+    sendingMode.value = ''
+  }
+}
+
+// 发送失败时把后端给的原因显示出来。桌面桥接的失败原因（会话校验不过、
+// 节点未确认等）都在 message 里，只写"发送失败"会让操作员无从下手。
+const formatSendError = (error) => {
+  const detail = error?.response?.data?.message || error?.message || ''
+  return detail ? `发送失败：${detail}` : '发送失败'
+}
+
+/**
+ * 重试一条发送失败的消息。
+ *
+ * ⚠️ 重试会**新起一个气泡**，原失败气泡保持红色不动。
+ * 原因在后端：`sendOutboundMessage` 每次发送都 INSERT 一条新的 `plat_messages`
+ * 行（`errors` 行不会被改写），拿不到"重发同一行"的语义。所以：
+ *   - 若把结果合并回原气泡 → 界面显示成功，但库里那行还是 failed，
+ *     刷新后红色气泡又回来，用户可能再点一次重试 → 重复发送；
+ *   - 新起气泡 → 界面与库一致（一次失败 + 一次成功），不会谎报成功。
+ *
+ * 不重新走 handleSend：重试沿用原消息的请求负载，否则媒体消息会退化成纯文本。
+ */
+const handleRetry = async (msg) => {
+  if (transportReadOnly.value || !props.conversation?.id || sending.value) return
+  if (!msg || msg.sendStatus !== 'failed') return
+
+  const convId = props.conversation.id
+  const payload = msg.retryPayload || { content: msg.content, messageType: msg.type || 'text' }
+  const { content, messageType, isTranslateSend = false } = payload
+
+  const tempId = 'temp_retry_' + Date.now()
+  const optimisticTs = nextOutboundTimestamp()
+  upsertMessage({
+    id: tempId,
+    clientId: tempId,
+    conversationId: convId,
+    direction: 'outbound',
+    senderType: 'agent',
+    content,
+    messageType,
+    serverTimestamp: optimisticTs,
+    sendStatus: 'sending',
+    retryPayload: payload
+  })
+
+  sending.value = true
+  sendingMode.value = isTranslateSend ? 'translate' : 'send'
+  try {
+    const res = await sendMessage(convId, {
+      content,
+      messageType,
+      clientId: tempId,
+      translateToCustomerLanguage: isTranslateSend
+    })
+    upsertMessage({
+      id: res.data?.messageId || tempId,
+      clientId: tempId,
+      conversationId: convId,
+      direction: 'outbound',
+      senderType: 'agent',
+      content: res.data?.content || content,
+      messageType,
+      channelMsgId: res.data?.channelMsgId || null,
+      serverTimestamp: optimisticTs,
+      sendStatus: res.data?.sendStatus || 'sent',
+      retryPayload: payload
+    })
+  } catch (error) {
+    console.error('[ChatWindow] 重试发送失败:', error)
+    upsertMessage({
+      id: tempId,
+      clientId: tempId,
+      conversationId: convId,
+      direction: 'outbound',
+      senderType: 'agent',
+      content,
+      messageType,
+      serverTimestamp: optimisticTs,
+      sendStatus: 'failed',
+      retryPayload: payload
+    })
+    ElMessage.error(formatSendError(error))
   } finally {
     sending.value = false
     sendingMode.value = ''

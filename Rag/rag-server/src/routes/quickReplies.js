@@ -51,6 +51,10 @@ function validatePayload(body = {}) {
   const category = String(body.category || '').trim()
   const sortOrder = Number.isFinite(Number(body.sortOrder)) ? Number(body.sortOrder) : 0
   const isEnabled = body.isEnabled === undefined ? true : Boolean(body.isEnabled)
+  // 归属：工作台的快捷话术面板按"创建人是不是我"分成「个人话术 / 公共话术」两层，
+  // 公共话术不记名（created_by 留空）。不传 shared 表示"不改变归属"，
+  // 这样只改内容时不会把已有的公共话术挪成个人话术。
+  const shared = body.shared === undefined ? undefined : Boolean(body.shared)
 
   if (!title) return { error: '指令标题不能为空' }
   if (title.length > 100) return { error: '指令标题不能超过100个字符' }
@@ -61,7 +65,7 @@ function validatePayload(body = {}) {
   if (content.length > 10000) return { error: '回复内容不能超过10000个字符' }
   if (category.length > 50) return { error: '分类不能超过50个字符' }
 
-  return { data: { title, shortcut, content, category, sortOrder, isEnabled } }
+  return { data: { title, shortcut, content, category, sortOrder, isEnabled, shared } }
 }
 
 // ========== 认证中间件 ==========
@@ -139,12 +143,14 @@ router.post('/', async (req, res) => {
 
     const id = crypto.randomUUID()
     const userId = req.user.id || req.user.userId || null
+    // 公共话术不记名（created_by 留空），工作台据此把它归到「公共话术」层
+    const createdBy = parsed.data.shared ? null : userId
     await sequelize.query(
       `INSERT INTO quick_replies
         (id, title, shortcut, content, category, is_enabled, sort_order, usage_count, created_by, updated_by, created_at, updated_at)
        VALUES
-        (:id, :title, :shortcut, :content, :category, :isEnabled, :sortOrder, 0, :userId, :userId, NOW(), NOW())`,
-      { replacements: { id, ...parsed.data, userId } }
+        (:id, :title, :shortcut, :content, :category, :isEnabled, :sortOrder, 0, :createdBy, :userId, NOW(), NOW())`,
+      { replacements: { id, ...parsed.data, createdBy, userId } }
     )
 
     const [rows] = await sequelize.query(
@@ -179,18 +185,25 @@ router.put('/:id', async (req, res) => {
     }
 
     const userId = req.user.id || req.user.userId || null
+    const sets = [
+      'title = :title',
+      'shortcut = :shortcut',
+      'content = :content',
+      'category = :category',
+      'is_enabled = :isEnabled',
+      'sort_order = :sortOrder',
+      'updated_by = :userId',
+      'updated_at = NOW()'
+    ]
+    const replacements = { id: req.params.id, ...parsed.data, userId }
+    // 只在显式传了 shared 时才改归属：否则"只改内容"会把公共话术悄悄挪成个人话术
+    if (parsed.data.shared !== undefined) {
+      sets.push('created_by = :createdBy')
+      replacements.createdBy = parsed.data.shared ? null : userId
+    }
     await sequelize.query(
-      `UPDATE quick_replies
-       SET title = :title,
-           shortcut = :shortcut,
-           content = :content,
-           category = :category,
-           is_enabled = :isEnabled,
-           sort_order = :sortOrder,
-           updated_by = :userId,
-           updated_at = NOW()
-       WHERE id = :id`,
-      { replacements: { id: req.params.id, ...parsed.data, userId } }
+      `UPDATE quick_replies SET ${sets.join(', ')} WHERE id = :id`,
+      { replacements }
     )
 
     const [rows] = await sequelize.query(

@@ -38,7 +38,7 @@ const DESKTOP_BRIDGE_SCHEMA_STATEMENTS = [
     preferred_node_id BIGINT UNSIGNED NULL,
     adapter_id VARCHAR(80) NOT NULL,
     mode ENUM('desktop_bridge','official_api','cloud_gateway') NOT NULL DEFAULT 'desktop_bridge',
-    ai_mode VARCHAR(30) NOT NULL DEFAULT 'review',
+    ai_mode VARCHAR(30) NOT NULL DEFAULT 'auto',
     enabled TINYINT(1) NOT NULL DEFAULT 1,
     created_by BIGINT NULL,
     updated_by BIGINT NULL,

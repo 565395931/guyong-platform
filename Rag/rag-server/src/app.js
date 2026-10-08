@@ -78,6 +78,16 @@ const { connectDB } = require('./config/database')
 
 // 导入 WebSocket 模块
 const { initializeWebSocket } = require('./modules/websocket')
+const { initDesktopBridge } = require('./modules/desktop-bridge')
+const { createInboundBridgeService } = require('./modules/desktop-bridge/inboundBridgeService')
+const { createBridgeRepository } = require('./modules/desktop-bridge/bridgeRepository')
+const { createLeaseService } = require('./modules/desktop-bridge/leaseService')
+const { createBridgeConfigurationProvider } = require('./modules/desktop-bridge/bridgeConfigurationProvider')
+const { ConnectionRegistry } = require('./modules/desktop-bridge/connectionRegistry')
+const { createBridgeCommandService, setActiveBridgeCommandService } = require('./modules/desktop-bridge/bridgeCommandService')
+const { createAccountSnapshotService } = require('./modules/desktop-bridge/accountSnapshotService')
+const { createBridgeExpiryService } = require('./modules/desktop-bridge/bridgeExpiryService')
+const desktopBridgeRoutes = require('./routes/desktopBridge')
 
 // 导入渠道适配器注册中心
 const { initAdapters, getAdapterByChannel } = require('./modules/channel-adapters')
@@ -246,6 +256,7 @@ app.use('/api/auth', authRoutes)
 app.use('/api/channel', channelWebhookRoutes)
 // 渠道账号管理路由（需 JWT 认证 + admin/supervisor 权限）
 app.use('/api/v1/channel-accounts', channelAccountRoutes)
+app.use('/api/v1/desktop-bridge', desktopBridgeRoutes)
 app.use('/api/v1/campaigns', campaignRoutes)
 app.use('/api/v1/video', videoRoutes)
 app.use('/api/v1/video-data', videoDataRoutes)
@@ -388,6 +399,60 @@ const cloudGateway = initCloudGateway({
   }
 })
 app.set('cloudGateway', cloudGateway)
+
+// Desktop Bridge：默认关闭，显式启用才挂载 WSS 网关（/bridge/v1）。
+// inboundService 是缺失已久的一环——没有它，message.inbound 会被静默丢弃并返回成功 ack。
+// 初始化失败不阻断主服务启动，只记错误（桥接不是主链路的前置条件）。
+let desktopBridge = null
+if (String(process.env.BRIDGE_ENABLED || '').toLowerCase() === 'true') {
+  try {
+    // 自己构造 repository 与 leaseService 并显式传入：configurationProvider 需要
+    // leaseService 来在节点上线时取租约，而它默认是在 initDesktopBridge 内部创建的。
+    const bridgeRepository = createBridgeRepository(sequelize)
+    const bridgeLeaseService = createLeaseService({ repository: bridgeRepository })
+    // 自己持有 registry 才能把出站指令投递到节点的 WS 连接上
+    const bridgeRegistry = new ConnectionRegistry()
+    const bridgeCommandService = createBridgeCommandService({
+      sequelize,
+      registry: bridgeRegistry
+    })
+    // 适配器实例在模块加载时就注册了，拿不到这里的依赖，用共享持有者传进去
+    setActiveBridgeCommandService(bridgeCommandService)
+
+    desktopBridge = initDesktopBridge({
+      httpServer,
+      sequelize,
+      eventEmitter,
+      options: {
+        repository: bridgeRepository,
+        leaseService: bridgeLeaseService,
+        registry: bridgeRegistry,
+        inboundService: createInboundBridgeService({ sequelize, eventEmitter }),
+        // 网关调的是 commandStatusService.handle(...)，而命令服务暴露的是 handleStatus。
+        // 直接传对象会因 handle 为 undefined 而静默丢弃节点回报的状态 ——
+        // 表现为「消息其实已发到客户端，但程序显示超时失败」。
+        commandStatusService: { handle: bridgeCommandService.handleStatus },
+        accountSnapshotService: createAccountSnapshotService({ sequelize }),
+        configurationProvider: createBridgeConfigurationProvider({
+          sequelize,
+          leaseService: bridgeLeaseService
+        })
+      }
+    })
+    // 会话过期归档：3 分钟无消息活动就归档（与飞鸽客户端行为一致）。
+    // 用 last_message_time 派生过期，任何一方发消息都会自然刷新倒计时。
+    const bridgeExpiry = createBridgeExpiryService({
+      sequelize,
+      ttlMinutes: Number(process.env.BRIDGE_SESSION_TTL_MINUTES || 3)
+    })
+    bridgeExpiry.start()
+    app.set('bridgeExpiry', bridgeExpiry)
+    console.log('[DesktopBridge] 网关已挂载于 /bridge/v1')
+  } catch (error) {
+    console.error('[DesktopBridge] 初始化失败，服务继续启动:', error.message)
+  }
+}
+app.set('desktopBridge', desktopBridge)
 
 // 启动服务器
 const PORT = Number.parseInt(process.env.PORT || '3001', 10)

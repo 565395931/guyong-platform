@@ -62,3 +62,39 @@ test('reports unknown when no channel accounts are configured', () => {
     channels: []
   })
 })
+
+// ========== 桌面桥接（抖店本地客户端）健康判定 ==========
+// 抖店没有"会话"可以查，唯一信号是有没有节点持有有效租约；掉线就要能让界面闪红光。
+
+test('reports douyin as CONNECTED when a node holds a live lease', () => {
+  const summary = buildChannelStatusSummary(
+    [{ channel: 'douyin', account_count: '1' }],
+    null,
+    { douyin: true }
+  )
+
+  assert.equal(summary.overall, 'HEALTHY')
+  assert.equal(summary.channels[0].status, 'CONNECTED')
+})
+
+test('reports douyin as OFFLINE and overall CRITICAL when no node holds a lease', () => {
+  const summary = buildChannelStatusSummary(
+    [{ channel: 'douyin', account_count: '1' }],
+    null,
+    { douyin: false }
+  )
+
+  assert.equal(summary.overall, 'CRITICAL')
+  assert.equal(summary.channels[0].status, 'OFFLINE')
+})
+
+test('keeps the old behaviour for channels without desktop bridge info', () => {
+  const summary = buildChannelStatusSummary(
+    [{ channel: 'douyin', account_count: '1' }, { channel: 'wecom_kf', account_count: '1' }],
+    null
+  )
+
+  // 不传第三个参数 = 不判（老调用方/测试只关心 WhatsApp）
+  assert.equal(summary.channels[0].status, 'ACTIVE')
+  assert.equal(summary.channels[1].status, 'ACTIVE')
+})

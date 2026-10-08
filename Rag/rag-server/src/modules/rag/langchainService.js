@@ -125,9 +125,11 @@ function createChatModel(options = {}) {
     temperature,
     maxTokens,
     streaming,
+    // apiKey / baseURL 都**现取** process.env：配置页保存时会同步过来，
+    // 写成模块级常量就成了"改了要重启"（原来 baseURL 就是读死的）。
     apiKey: process.env.DASHSCOPE_API_KEY,
     configuration: {
-      baseURL: DASHSCOPE_BASE_URL
+      baseURL: process.env.DASHSCOPE_BASE_URL || DASHSCOPE_BASE_URL
     }
   });
 }

@@ -67,6 +67,24 @@
             <p>{{ group.description }}</p>
           </div>
         </div>
+        <!-- 百炼 AccessKey：跟供应商密钥一样密文保存，页面只回掩码 -->
+        <div v-if="group.key === 'bailian'" class="provider-grid bailian-credential">
+          <label class="provider-field">
+            <span>AccessKeyId</span>
+            <el-input v-model="bailianInput.accessKeyId" :placeholder="bailian.credential?.configured ? `当前 ${bailian.credential.accessKeyIdMasked}（重新填写可覆盖）` : '阿里云 AccessKeyId'" />
+          </label>
+          <label class="provider-field">
+            <span>AccessKeySecret</span>
+            <el-input v-model="bailianInput.accessKeySecret" type="password" show-password placeholder="阿里云 AccessKeySecret" />
+            <small v-if="bailian.credential?.configured">
+              已配置 ········ {{ bailian.credential.secret?.lastFour }}（{{ bailian.credential.source === 'environment' ? '环境变量' : '后台配置' }}）
+            </small>
+          </label>
+          <div class="provider-actions">
+            <el-button type="primary" :disabled="!bailianInput.accessKeyId.trim() || !bailianInput.accessKeySecret.trim()" :loading="bailianSaving" @click="handleSaveBailian">保存 AccessKey</el-button>
+            <el-button :disabled="bailian.credential?.source !== 'database'" @click="handleClearBailian">清除覆盖</el-button>
+          </div>
+        </div>
         <div class="field-grid">
           <label v-for="field in fieldsByGroup(group.key)" :key="field.key" class="config-field">
             <span class="config-field__label">{{ field.label }}</span>
@@ -122,6 +140,7 @@ import { Check, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   clearAiProviderCredential, getAiConfig, getAiProvider, getAiProviderBalance,
+  getBailianCredential, saveBailianCredential, clearBailianCredential,
   saveAiProviderCredential, syncAiProviderModels, testAiProvider, updateAiConfig
 } from '@/api/aiConfig'
 import {
@@ -132,9 +151,11 @@ import {
 } from '@/modules/aiConfig/aiConfigForm'
 
 const groups = [
-  { key: 'review', index: '01', label: '消息审核', description: '控制入站风险判定、上下文和降级阈值。' },
-  { key: 'reply', index: '02', label: '回复模型', description: '配置自动回复、坐席建议、校验和翻译模型。' },
-  { key: 'runtime', index: '03', label: '运行参数', description: '限制调用时长、并发和各类上下文规模。' }
+  { key: 'provider', index: '01', label: '大模型接口', description: 'OpenAI 兼容接口地址、默认模型与 AI 推荐回答开关；接口密钥在页面顶部的供应商卡片里填。' },
+  { key: 'bailian', index: '02', label: '百炼应用', description: '阿里云百炼（DashScope）的应用标识，知识库上传与解析要用；AccessKey 在下方单独填，密文保存。' },
+  { key: 'review', index: '03', label: '消息审核', description: '控制入站风险判定、上下文和降级阈值。' },
+  { key: 'reply', index: '04', label: '回复模型', description: '配置自动回复、坐席建议、校验和翻译模型。' },
+  { key: 'runtime', index: '05', label: '运行参数', description: '限制调用时长、并发和各类上下文规模。' }
 ]
 const form = reactive({})
 const original = reactive({})
@@ -148,10 +169,56 @@ const providerTesting = ref(false)
 const providerTested = ref(false)
 const modelsSyncing = ref(false)
 const balanceLoading = ref(false)
+// 百炼 AccessKey（密文保存，页面只回掩码）
+const bailian = reactive({ credential: {} })
+const bailianInput = reactive({ accessKeyId: '', accessKeySecret: '' })
+const bailianSaving = ref(false)
 const balance = reactive({ supported: null, amount: null, currency: null, reason: '' })
 const balanceText = computed(() => balance.supported ? `${balance.currency || ''} ${balance.amount}`.trim() : '不可查询')
 const balanceReason = computed(() => balance.reason || (balance.supported === null ? '尚未查询' : '供应商未提供余额接口'))
 const fieldsByGroup = key => AI_CONFIG_FIELDS.filter(field => field.group === key)
+
+async function loadBailianCredential() {
+  try {
+    const response = await getBailianCredential()
+    Object.assign(bailian, response.data?.data || response.data || {})
+  } catch (err) {
+    console.error('[AiConfig] 读取百炼凭据失败:', err)
+  }
+}
+
+async function handleSaveBailian() {
+  bailianSaving.value = true
+  try {
+    const response = await saveBailianCredential({
+      accessKeyId: bailianInput.accessKeyId.trim(),
+      accessKeySecret: bailianInput.accessKeySecret.trim()
+    })
+    Object.assign(bailian, response.data?.data || response.data || {})
+    bailianInput.accessKeyId = ''
+    bailianInput.accessKeySecret = ''
+    ElMessage.success('百炼 AccessKey 已保存')
+  } catch (err) {
+    ElMessage.error(err?.response?.data?.message || err.message || '保存失败')
+  } finally {
+    bailianSaving.value = false
+  }
+}
+
+async function handleClearBailian() {
+  try {
+    await ElMessageBox.confirm('清除后回退到 .env 里的配置（如果没有就留空）。', '确认清除', {
+      type: 'warning', confirmButtonText: '清除', cancelButtonText: '取消'
+    })
+  } catch { return }
+  try {
+    const response = await clearBailianCredential()
+    Object.assign(bailian, response.data?.data || response.data || {})
+    ElMessage.success('已清除覆盖')
+  } catch (err) {
+    ElMessage.error(err?.response?.data?.message || err.message || '清除失败')
+  }
+}
 
 async function loadConfig() {
   loading.value = true
@@ -258,6 +325,7 @@ async function saveChanges() {
 
 loadConfig()
 loadProvider()
+loadBailianCredential()
 </script>
 
 <style scoped lang="scss">

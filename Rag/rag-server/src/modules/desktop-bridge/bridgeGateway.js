@@ -23,6 +23,7 @@ function createBridgeGateway({
   leaseService,
   inboundService,
   commandStatusService,
+  accountSnapshotService,
   configurationProvider = async () => ({}),
   environment = process.env.NODE_ENV || 'development',
   allowInsecureLan = process.env.BRIDGE_ALLOW_INSECURE_LAN === 'true',
@@ -130,7 +131,14 @@ function createBridgeGateway({
         nodeId: session.databaseNodeId,
         nodeKey: session.nodeId
       }) || result
-    } else if (!['account.snapshot', 'account.state.changed'].includes(envelope.type)) {
+    } else if (envelope.type === 'account.snapshot') {
+      // 节点上报"当前会话列表"，用于归档/恢复判定
+      result = await accountSnapshotService?.handle?.({
+        envelope,
+        nodeId: session.databaseNodeId,
+        nodeKey: session.nodeId
+      }) || result
+    } else if (envelope.type !== 'account.state.changed') {
       throw new BridgeGatewayError('MESSAGE_TYPE_NOT_ALLOWED', `Node cannot send ${envelope.type}`)
     }
 

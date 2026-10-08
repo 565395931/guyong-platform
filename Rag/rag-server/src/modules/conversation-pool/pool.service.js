@@ -1396,6 +1396,15 @@ async function getPoolStats(seatId, role) {
       { replacements }
     )
 
+    // 按渠道的待人工数量：左侧渠道菜单要在「抖店」这类条目右边显示红点数字。
+    // 待人工是公共池，不按坐席过滤，全员看到同一个数字。
+    const [pendingRows] = await sequelize.query(
+      `SELECT channel, COUNT(*) AS pending_count
+         FROM conversations
+        WHERE pool_type = 'pending_human' AND conv_status != 'archived'
+        GROUP BY channel`
+    )
+
     const stats = rows[0] || {}
     const data = {
       ai_self: stats.ai_self || 0,
@@ -1404,7 +1413,10 @@ async function getPoolStats(seatId, role) {
       long_term: stats.long_term || 0,
       private: stats.private_pool || 0,
       archived: stats.archived || 0,
-      all: stats.total || 0
+      all: stats.total || 0,
+      pendingByChannel: Object.fromEntries(
+        pendingRows.map(row => [row.channel, Number(row.pending_count || 0)])
+      )
     }
     poolStatsCache.set(cacheKey, { data, timestamp: Date.now() })
     if (poolStatsCache.size > 100) {

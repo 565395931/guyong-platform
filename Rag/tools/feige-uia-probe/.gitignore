@@ -1,0 +1,11 @@
+# 探针原始输出：可能包含未脱敏的界面文本，禁止提交。
+raw/
+out/
+
+# 桌面桥接节点凭据（含 enrollment token），绝不入库。
+.bridge-node.json
+
+# 本机运行产物
+__pycache__/
+*.pyc
+*.log

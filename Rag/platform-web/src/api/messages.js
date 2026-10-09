@@ -39,6 +39,19 @@ export function useQuickReply(id) {
   return request.post(`/v1/quick-replies/${id}/use`)
 }
 
+// 快捷话术的增删改（后端只允许 admin / 主管，坐席调用会 403）
+export function createQuickReply(data) {
+  return request.post('/v1/quick-replies', data)
+}
+
+export function updateQuickReply(id, data) {
+  return request.put(`/v1/quick-replies/${encodeURIComponent(id)}`, data)
+}
+
+export function deleteQuickReply(id) {
+  return request.delete(`/v1/quick-replies/${encodeURIComponent(id)}`)
+}
+
 /**
  * 调用 RAG 推荐接口（SSE 流式）
  * POST /api/v1/messages/:msgId/suggestions

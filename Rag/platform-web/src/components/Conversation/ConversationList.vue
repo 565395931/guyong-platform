@@ -24,12 +24,6 @@
       </div>
     </div>
 
-    <!-- AI 自助池提示条 -->
-    <div v-if="!globalSearch && conversationStore.activePoolTab === 'ai_self'" class="ai-pool-notice">
-      <el-icon size="14" color="#e6a23c"><WarningFilled /></el-icon>
-      <span>客户未被告知是 AI，请接管后自然承接话术，勿提及 AI/机器人</span>
-    </div>
-
     <!-- 待人工池提示条 -->
     <div v-if="!globalSearch && conversationStore.activePoolTab === 'pending_human'" class="pending-pool-notice">
       <el-icon size="14" color="#f56c6c"><BellFilled /></el-icon>
@@ -130,7 +124,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch, markRaw } from 'vue'
 import {
   Search, WarningFilled, BellFilled,
-  Bell, Monitor, Share, Clock, UserFilled, Box
+  Bell, Monitor, UserFilled, Box
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useConversationStore } from '@/stores/conversation'
@@ -177,6 +171,8 @@ let loadAbortController = null
 let searchAbortController = null
 let loadRequestSeq = 0
 let searchRequestSeq = 0
+// 最近一次实际发起加载的 Tab，用于区分"外部切换 Tab"与 switchTab 自己的加载
+let lastRequestedTab = null
 let hiddenAt = 0
 
 const createTimedAbortController = () => {
@@ -232,12 +228,12 @@ const getTimeRangeParams = () => {
 }
 
 // ========== 池 Tab 定义 ==========
-// 待人工池置顶（最高优先级），AI自助池第二，公共池第三
+// 待人工池置顶（最高优先级），AI自助池第二，我的会话其次，归档最后。
+// 已移除「公共池」与「长期跟进」：当前业务只有单店铺单客服，不涉及抢单池与长期跟进，
+// 留着只会让人误以为需要人工认领。（后端 pool_type 仍保留这两个取值，此处仅不展示。）
 const poolTabs = [
   { key: 'pending_human', label: '待人工', short: '待人工', badgeType: 'danger',   icon: markRaw(Bell) },
   { key: 'ai_self',       label: 'AI自助', short: 'AI',     badgeType: 'primary',  icon: markRaw(Monitor) },
-  { key: 'public',        label: '公共池', short: '公共',   badgeType: 'info',     icon: markRaw(Share) },
-  { key: 'long_term',     label: '长期跟进', short: '长期', badgeType: 'success',  icon: markRaw(Clock) },
   { key: 'private',       label: '我的会话', short: '我的', badgeType: 'warning',  icon: markRaw(UserFilled) },
   { key: 'archived',      label: '已归档', short: '归档',   badgeType: 'info',     icon: markRaw(Box) }
 ]
@@ -425,6 +421,7 @@ const loadConversations = async () => {
   cancelLoadRequest()
   const requestSeq = ++loadRequestSeq
   const requestedTab = conversationStore.activePoolTab
+  lastRequestedTab = requestedTab
   const { controller, signal, hasTimedOut, cleanup } = createTimedAbortController()
   loadAbortController = controller
   loading.value = true
@@ -635,14 +632,15 @@ const handleAssignSeat = async ({ seatId, seat }) => {
 const handleRelease = async (conv) => {
   try {
     await ElMessageBox.confirm(
-      '释放后该会话将回到公共池，其他坐席可认领。',
-      '确认释放',
-      { type: 'warning', confirmButtonText: '确认释放', cancelButtonText: '取消' }
+      '释放后该会话将直接进入归档（本系统当前不使用公共池）。',
+      '确认归档',
+      { type: 'warning', confirmButtonText: '确认归档', cancelButtonText: '取消' }
     )
 
-    const res = await releaseConversation(conv.id)
+    // 释放改为归档：公共池已从界面移除
+    const res = await archiveConversation(conv.id)
     if (res.success !== false) {
-      ElMessage.success('已释放到公共池')
+      ElMessage.success('已归档')
       conversationStore.removeConversation(conv.id)
       conversationStore.fetchPoolStats({ force: true })
       conversationStore.fetchSeatLoad({ force: true })
@@ -769,9 +767,12 @@ const handleTransferToAi = async (conv) => {
   }
 }
 
-// ========== 监听池统计更新 ==========
-watch(() => conversationStore.activePoolTab, () => {
-  // Tab 切换时由 switchTab 处理加载
+// ========== 监听池 Tab 变化 ==========
+// 外部切换（WebSocket 池变更时自动跟到「我的」）也要刷新列表。
+// switchTab 自己会调 loadConversations，这里用 lastRequestedTab 去重，
+// 避免同一次切换加载两遍。
+watch(() => conversationStore.activePoolTab, (tab) => {
+  if (tab && tab !== lastRequestedTab) loadConversations()
 })
 
 // ========== 初始化 ==========

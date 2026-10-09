@@ -12,6 +12,7 @@ const TaobaoCommerceAdapter = require('./taobao-commerce/taobaoAdapter')
 const Alibaba1688CommerceAdapter = require('./alibaba1688-commerce/alibaba1688Adapter')
 const XiaohongshuCommerceAdapter = require('./xiaohongshu-commerce/xiaohongshuAdapter')
 const WechatShopCommerceAdapter = require('./wechat-shop-commerce/wechatShopAdapter')
+const { DesktopBridgeAdapter } = require('./desktop-bridge/desktopBridgeAdapter')
 const KuaishouCommerceAdapter = require('./kuaishou-commerce/kuaishouAdapter')
 
 // 适配器注册表：adapterType → 适配器实例
@@ -50,6 +51,9 @@ function initAdapters({ orderProjectionMappers } = {}) {
   adapterRegistry['xiaohongshu_commerce'] = new XiaohongshuCommerceAdapter()
   adapterRegistry['wechat_shop_commerce'] = new WechatShopCommerceAdapter()
   adapterRegistry['kuaishou_commerce'] = new KuaishouCommerceAdapter()
+  // 桌面桥接账号（adapter_type = 'desktop_bridge'）的客服聊天出站通道。
+  // 官方接口不提供客服消息收发，这类账号的发送只能经本机节点写入桌面客户端。
+  adapterRegistry['desktop_bridge'] = new DesktopBridgeAdapter()
 
   // ===== 未来渠道在此注册 =====
   // adapterRegistry['waaku'] = new WaakuAdapter()

@@ -46,9 +46,9 @@ const Bailian20231229 = require('@alicloud/bailian20231229'); // 需要安装：
 const OpenApi = require('@alicloud/openapi-client'); // 需要安装：npm install @alicloud/openapi-client
 const Util = require('@alicloud/tea-util'); // 需要安装：npm install @alicloud/tea-util
 
-const WORKSPACE_ID = process.env.WORKSPACE_ID;
-const INDEX_ID = process.env.INDEX_ID;
-const CATEGORY_ID = process.env.CATEGORY_ID;
+// ⚠️ 百炼应用标识**不要固化成模块级常量**：配置页保存时会同步到 process.env，
+// 加载时读死的话页面改了不生效（只能改 .env 再重启）。
+const bailianId = (name) => String(process.env[name] || '').trim();
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
 
 /**
@@ -1080,8 +1080,8 @@ ${chunk.content}`;
     });
     
     const leaseResponse = await client.applyFileUploadLeaseWithOptions(
-      CATEGORY_ID,
-      WORKSPACE_ID,
+      bailianId('CATEGORY_ID'),
+      bailianId('WORKSPACE_ID'),
       applyLeaseRequest,
       {},
       runtime
@@ -1098,12 +1098,12 @@ ${chunk.content}`;
     // 5. 提交文件到百炼数据中心
     const addFileRequest = new Bailian20231229.AddFileRequest({
       leaseId: leaseId,
-      categoryId: CATEGORY_ID,
+      categoryId: bailianId('CATEGORY_ID'),
       parser: 'DASHSCOPE_DOCMIND'
     });
     
     const addFileResponse = await client.addFileWithOptions(
-      WORKSPACE_ID,
+      bailianId('WORKSPACE_ID'),
       addFileRequest,
       {},
       runtime
@@ -1188,13 +1188,13 @@ async function uploadChunksToIndex(chunks, fileName) {
   console.log('文件ID数量:', fileIds.length);
   
   const indexRequest = new Bailian20231229.SubmitIndexAddDocumentsJobRequest({
-    indexId: INDEX_ID,
+    indexId: bailianId('INDEX_ID'),
     sourceType: 'DATA_CENTER_FILE',
     documentIds: fileIds
   });
   
   const indexResponse = await client.submitIndexAddDocumentsJobWithOptions(
-    WORKSPACE_ID,
+    bailianId('WORKSPACE_ID'),
     indexRequest,
     {},
     runtime
@@ -1231,7 +1231,7 @@ async function pollIndexJobStatus(jobId, maxRetry = 30) {
     const request = new Bailian20231229.DescribeIndexAddDocumentsJobRequest({});
     
     const response = await client.describeIndexAddDocumentsJobWithOptions(
-      WORKSPACE_ID,
+      bailianId('WORKSPACE_ID'),
       jobId,
       request,
       {},
@@ -1484,6 +1484,7 @@ module.exports = {
   
   // 百炼客户端（供外部复用）
   createBailianClient,
-  WORKSPACE_ID,
-  INDEX_ID
+  // 应用标识以**函数**暴露：导出常量会在加载时读死（见文件上方 bailianId 的说明）
+  getWorkspaceId: () => bailianId('WORKSPACE_ID'),
+  getIndexId: () => bailianId('INDEX_ID')
 };

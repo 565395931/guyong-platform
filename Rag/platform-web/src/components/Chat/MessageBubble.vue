@@ -1,5 +1,30 @@
 <template>
   <div class="message-bubble" :class="`message-bubble--${message.role}`">
+    <!-- 发送状态：仅出站消息，绝对定位到气泡左侧（不改变气泡自身布局） -->
+    <span
+      v-if="showSendStatus"
+      class="send-status"
+      :class="`send-status--${sendStatusView}`"
+      :title="sendStatusTitle"
+      :role="sendStatusView === 'failed' ? 'button' : 'status'"
+      :aria-label="sendStatusTitle"
+      @click="handleStatusClick"
+    >
+      <!-- 发送中：转圈 -->
+      <svg v-if="sendStatusView === 'sending'" class="send-status__spinner" viewBox="0 0 24 24" fill="none">
+        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2.5" opacity="0.25"/>
+        <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+      </svg>
+      <!-- 已确认送达：绿色对勾（短暂显示后消失） -->
+      <svg v-else-if="sendStatusView === 'sent'" viewBox="0 0 24 24" fill="none">
+        <path d="M9 16.17L4.83 12L3.41 13.41L9 18.83L20.59 7.41L19.17 6L9 16.17Z" fill="currentColor"/>
+      </svg>
+      <!-- 失败：标红，点击重试 -->
+      <svg v-else viewBox="0 0 24 24" fill="none">
+        <path d="M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM13 17H11V15H13V17ZM13 13H11V7H13V13Z" fill="currentColor"/>
+      </svg>
+    </span>
+
     <!-- 引用消息块 -->
     <div v-if="message.quotedMsg" class="message-bubble__quoted">
       <div class="message-bubble__quoted-bar"></div>
@@ -232,7 +257,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import { fetchSuggestions, submitSuggestionFeedback } from '@/api/messages'
@@ -243,7 +268,7 @@ const props = defineProps({
   message: { type: Object, required: true }
 })
 
-const emit = defineEmits(['adopt'])
+const emit = defineEmits(['adopt', 'retry'])
 
 const showSuggestion = ref(false)
 const loading = ref(false)
@@ -308,6 +333,74 @@ const showMessageFeedback = computed(() => {
     ['agent', 'ai'].includes(props.message.senderType) &&
     !!messageAnswerText.value
 })
+
+// ========== 发送状态 ==========
+// sending 转圈 → 确认成功变绿勾并**自动消失** → 失败标红且可点击重试。
+// 失败时消息保留在列表里（不消失），用户可重试或自行决定放弃。
+const SENT_CHECK_VISIBLE_MS = 2000
+
+const isOutgoingMessage = computed(() =>
+  props.message.role === 'agent' || props.message.direction === 'outbound'
+)
+
+// 仍在途中的状态：本地占位（sending）与服务端"已落库但未确认"（received 等）。
+// ⚠️ 'received' 不等于"已发出"：发送路由先把消息行按默认值 received 落库并**立刻推送**，
+// 之后（桌面桥接要等节点确认，实测约 6 秒）才改成 sent/failed 再推一次。
+// 早期把 received 当作确认，绿勾会在后端确认**之前**就亮起来——正是
+// "把错误的判断做得更好看"。只有 sent/delivered/read 才算确认。
+const SEND_IN_FLIGHT_STATUSES = new Set(['sending', 'received', 'queued', 'accepted', 'pending'])
+
+const sendStatusView = computed(() => {
+  const status = String(props.message.sendStatus || 'sent')
+  if (status === 'failed') return 'failed'
+  if (SEND_IN_FLIGHT_STATUSES.has(status)) return 'sending'
+  // 其余（含未知取值）按已确认处理：只是不显示指示器，避免未知状态转圈转到天荒地老
+  return 'sent'
+})
+
+// 绿勾只在对勾**刚出现**的那一下短暂显示：历史消息（挂载时就已经是 sent）
+// 不该跟着闪一次对勾，所以这里不做 immediate 监听，只在状态发生跃迁时点亮。
+const showSentCheck = ref(false)
+let sentCheckTimer = null
+const clearSentCheckTimer = () => {
+  if (sentCheckTimer) {
+    clearTimeout(sentCheckTimer)
+    sentCheckTimer = null
+  }
+}
+
+watch(sendStatusView, (view, prev) => {
+  clearSentCheckTimer()
+  if (view === 'sent' && prev && prev !== 'sent') {
+    showSentCheck.value = true
+    sentCheckTimer = setTimeout(() => {
+      sentCheckTimer = null
+      showSentCheck.value = false
+    }, SENT_CHECK_VISIBLE_MS)
+  } else if (view !== 'sent') {
+    showSentCheck.value = false
+  }
+})
+
+onBeforeUnmount(clearSentCheckTimer)
+
+const showSendStatus = computed(() => {
+  if (!isOutgoingMessage.value) return false
+  const view = sendStatusView.value
+  if (view === 'sending' || view === 'failed') return true
+  return showSentCheck.value
+})
+
+const sendStatusTitle = computed(() => {
+  if (sendStatusView.value === 'sending') return '发送中…'
+  if (sendStatusView.value === 'failed') return '发送失败，点击重试'
+  return '已发送'
+})
+
+const handleStatusClick = () => {
+  if (sendStatusView.value !== 'failed') return
+  emit('retry', props.message)
+}
 
 // 切换模型时由 Pinia 统一记住选择并重新生成
 const handleModelChange = () => {
@@ -479,6 +572,7 @@ const handleCopy = () => {
 
 <style lang="scss" scoped>
 .message-bubble {
+  position: relative;
   max-width: 70%;
   padding: 8px 14px;
   border-radius: 8px;
@@ -693,6 +787,58 @@ const handleCopy = () => {
       border-color: #86efac;
     }
   }
+}
+
+/* ===== 发送状态指示（气泡左侧） ===== */
+.send-status {
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  color: #94a3b8;
+
+  svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  &--sending {
+    color: #94a3b8;
+  }
+
+  &--sent {
+    color: #16a34a;
+    animation: send-status-pop 0.22s ease;
+  }
+
+  &--failed {
+    color: #ef4444;
+    cursor: pointer;
+    animation: send-status-pop 0.22s ease;
+
+    &:hover {
+      color: #dc2626;
+    }
+  }
+}
+
+.send-status__spinner {
+  animation: send-status-spin 0.9s linear infinite;
+}
+
+@keyframes send-status-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes send-status-pop {
+  0% { transform: scale(0.6); opacity: 0.4; }
+  100% { transform: scale(1); opacity: 1; }
 }
 
 /* ===== AI 推荐按钮 ===== */

@@ -1,4 +1,5 @@
 const OpenAI = require('openai')
+const { QueryTypes } = require('sequelize')
 const { sequelize } = require('../../config/database')
 const configService = require('../../services/configService')
 const systemLogger = require('../../utils/systemLogger')
@@ -86,10 +87,34 @@ async function isSeatOnline(operatorId) {
   return Boolean(rows[0])
 }
 
+/**
+ * 解析出站适配器 —— **必须按账号优先判定**。
+ *
+ * 只按渠道解析（getAdapterByChannel）在桌面桥接上必然失败：抖店的本地客户端账号
+ * 会拿到官方抖音适配器，而它固定返回"开放平台未提供客服消息 API"。表现就是
+ * **审核通过的 AI 回复永远发不出去**（手动发送那条链路 routes/conversations.js
+ * 早就按账号优先判定了，这里对齐）。
+ */
+async function resolveOutboundAdapter(conversation) {
+  const accountId = conversation.account_id
+  if (accountId) {
+    const [rows] = await sequelize.query(
+      'SELECT adapter_type FROM channel_accounts WHERE id = :accountId',
+      { replacements: { accountId }, type: QueryTypes.SELECT }
+    )
+    if (rows[0] && rows[0].adapter_type === 'desktop_bridge') {
+      const { getAdapter } = require('../channel-adapters')
+      const bridgeAdapter = getAdapter('desktop_bridge')
+      if (bridgeAdapter) return bridgeAdapter
+    }
+  }
+  return getAdapterByChannel(conversation.channel)
+}
+
 async function sendHumanReviewReply({ conversationId, operatorId, text }) {
   const conversation = await getConversation(conversationId)
   if (!conversation) return { success: false, message: 'Conversation not found' }
-  const adapter = getAdapterByChannel(conversation.channel)
+  const adapter = await resolveOutboundAdapter(conversation)
   if (!adapter) return { success: false, message: `No outbound adapter for ${conversation.channel}` }
   if (!conversation.account_id || !conversation.user_id) {
     return { success: false, message: 'Conversation has no outbound account or recipient' }
@@ -109,7 +134,8 @@ async function sendHumanReviewReply({ conversationId, operatorId, text }) {
     sendResult = await adapter.sendMessage(
       conversation.account_id,
       conversation.user_id,
-      { content: { text }, messageType: 'text' }
+      // localMessageId：桌面桥接要拿它把下发指令绑回上面这条消息行（与手动发送一致）
+      { content: { text }, messageType: 'text', localMessageId: stored.messageId }
     )
   } catch (error) {
     sendResult = { success: false, error: error.message }

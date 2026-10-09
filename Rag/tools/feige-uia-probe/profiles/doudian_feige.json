@@ -1,0 +1,164 @@
+{
+  "$comment": "飞鸽（抖店工作台）UIA 采点配置。status=verified 的条目由 2026-09-24 只读探针实测确认。",
+  "adapter_id": "doudian.feige",
+  "platform": "doudian",
+  "client_process_hints": ["doudian.exe", "feige.exe"],
+  "window_class": "Chrome_WidgetWin_1",
+  "uia_stack": "Electron/Chromium + webview 嵌套文档",
+
+  "attach_target": {
+    "$comment": "★ 最关键的一条。附加到顶层窗口只能得到空的 PaneControl 链；必须附加到子窗口 Chrome_RenderWidgetHostHWND（Chromium 的 Chrome Legacy Window）才能拿到完整元素树。实测 630 节点 / 168 文本节点。",
+    "step_1_find_main_window": "EnumWindows 找 class=Chrome_WidgetWin_1 且标题匹配 ^\\[商家\\] 的窗口",
+    "step_2_find_render_host": "EnumChildWindows(main) 找 class=Chrome_RenderWidgetHostHWND 的子窗口",
+    "step_3_attach": "uiautomation.ControlFromHandle(render_host_hwnd)",
+    "observed": { "main_hwnd": 1444098, "render_host_hwnd": 9114592 },
+    "anti_pattern": "不要用 GetRootControl().GetChildren() 遍历找窗口，会对上百个无关窗口逐个读属性并长时间阻塞。"
+  },
+
+  "visibility_requirements": {
+    "$comment": "实测结论：不需要前台焦点，被其他窗口覆盖也可读；但最小化或隐藏时读不到。",
+    "requires_foreground": false,
+    "evidence_foreground": "读取成功时 GetForegroundWindow() 返回编辑器窗口，飞鸽为后台窗口。",
+    "requires_not_minimized": true,
+    "requires_not_hidden": true,
+    "occlusion_effect": "none",
+    "$comment_occlusion": "早期版本把读不到归因于遮挡，已证伪：遮挡率降到 0.029 时从顶层附加仍为 0 文本节点。真正变量是附加目标。"
+  },
+
+  "surfaces": [
+    {
+      "name": "main",
+      "status": "verified",
+      "title_regex": "^\\[商家\\]",
+      "role": "飞鸽客服系统（会话列表 + 当前会话消息）",
+      "hosted_in": "webview 嵌套文档 DocumentControl '飞鸽客服系统'",
+      "observed_geometry": "1280x680",
+      "containers": {
+        "imroot": "飞鸽 IM 根节点",
+        "chantListScrollArea": "会话列表滚动区",
+        "workspace-chat": "会话工作区（消息区）",
+        "rc-tabs-0-tab-current": "当前会话(n) 页签 — 会话计数",
+        "rc-tabs-0-tab-history": "最近联系 页签",
+        "rc-tabs-0-tab-platformMessage": "平台消息 n 页签",
+        "topbar-left-info": "当前客户昵称 + 添加备注",
+        "topbar-sec-container": "新客 / 渠道 / 回访 / 更多",
+        "im-input-box": "输入框 — 禁止触碰",
+        "wrap_persist:<id>": "持久化容器，含数字 ID，疑似稳定会话 ID（待确认）"
+      },
+      "fields": {
+        "shop_name": {
+          "locator": "窗口标题 [商家]<店铺名>；或会话区头像 alt 文本",
+          "observed": { "title_len": 12, "avatar_alt": { "length": 8, "digest": "e3191bd80966" } }
+        },
+        "agent_status": {
+          "locator": "含 小休/上线/离线/忙碌 的按钮文本",
+          "observed": "小休"
+        },
+        "conversation_unread_badge": {
+          "locator": "会话项内的纯数字节点",
+          "status": "partial",
+          "$comment": "当前按'头像'锚点切段会把商品卡价格 ¥260.00 误判为徽标（实测出现未读=260）。必须改为按真实 DOM 层级定位。"
+        },
+        "customer_nickname": {
+          "locator": "会话列表项 / topbar-left-info / 消息浮窗",
+          "observed": { "length": 3, "digest": "6c6992eaa0f2" }
+        },
+        "message_time": {
+          "locator": "HH:MM 或 HH:MM:SS 文本节点",
+          "observed": ["17:43", "17:43:23", "17:43:41", "17:43:48", "21:16", "21:16:43"],
+          "$comment": "★ 绝对时间，不是相对时间。指纹应优先用秒级（HH:MM:SS）；分钟级精度区分度不足。"
+        },
+        "message_content": {
+          "locator": "时间锚点之前累积的正文文本",
+          "observed_lengths": [267, 101, 115, 146, 7, 78, 116, 443]
+        },
+        "message_read_state": { "locator": "已读 / 未读 文本节点" },
+        "role_labels": ["智能客服", "系统消息", "机器人接待中", "客服<店铺名>接入", "离线留言发起会话"],
+        "sent_by_labels": ["抖音电商智能客服发送", "商家配置发送"],
+        "history_marker": "以上为历史消息"
+      },
+      "known_defects": [
+        "会话列表字段切分把商品卡价格误判为未读徽标",
+        "8 条消息中 5 条发送者归属为 unknown，角色标签与正文配对规则不完整",
+        "末尾未闭合块（最新一条消息）无时间戳"
+      ]
+    },
+    {
+      "name": "widget",
+      "status": "verified",
+      "title_regex": "悬浮小组件",
+      "role": "店铺名 + 各业务入口未处理计数",
+      "window_hwnd_observed": 2561394,
+      "observed_geometry": "306x88",
+      "fields": {
+        "shop_name": { "observed": { "length": 8, "digest": "e3191bd80966" } },
+        "nav_badges": {
+          "labels": {
+            "接待": "pending_service",
+            "通知": "notifications",
+            "待发货": "pending_shipment",
+            "待售后": "pending_aftersale",
+            "首页": "home"
+          },
+          "observed": { "pending_service": 1, "notifications": 3, "pending_shipment": 0, "pending_aftersale": 0 }
+        }
+      }
+    },
+    {
+      "name": "toast",
+      "status": "verified",
+      "title_regex": "商家消息窗口",
+      "role": "新消息浮窗：待回复计数 + 客户昵称 + 消息预览 + 相对时间",
+      "window_hwnd_observed": 2493190,
+      "observed_geometry": "336x100",
+      "ephemeral": true,
+      "fields": {
+        "pending_label": { "observed_prefix": "待回复（" },
+        "pending_count": { "observed": 1 },
+        "sender_nickname": { "observed": { "length": 3, "digest": "6c6992eaa0f2" } },
+        "time_text": { "observed": "1小时", "$comment": "相对时间，会随小时数漂移，不要写进指纹" },
+        "content": { "observed": { "length": 102, "digest": "ff3b95182a95" }, "truncated": true }
+      }
+    }
+  ],
+
+  "virtualization": {
+    "$comment": "大量消息节点 rect=@0,0 0x0 且 offscreen=True —— 在树里但未布局。好消息：历史消息不依赖滚动即可读。代价：几何信息不可用，排序必须用文档顺序（树序），不能用屏幕坐标。",
+    "ordering": "document-order",
+    "history_retention_limit": "unknown — 需向上滚动后观测上限"
+  },
+
+  "dedup": {
+    "formula": "sha256(adapter_id | surface | conversation_key | direction | sender_key | time_text | content_digest | occurrence)",
+    "anchored_on": "absolute_timestamp",
+    "occurrence_scope": "同一会话内 (direction, sender_key, time_text, content_digest) 相同的重复消息按出现次序编号",
+    "measured_2026_09_24": {
+      "rounds": 3,
+      "messages_per_round": 8,
+      "stable_messages": 7,
+      "unstable_messages": 1,
+      "unstable_root_cause": "富媒体商品卡消息的懒渲染子节点导致正文长度抖动 ±1~3 字符；且该条时间戳仅分钟精度",
+      "duplicates_prevented": 14
+    },
+    "hardening_required": [
+      "富媒体消息只哈希稳定锚点（时间戳 + 发送者 + 商品 ID / 首行标题），不要哈希整段累积文本",
+      "优先使用秒级时间戳 HH:MM:SS",
+      "若 wrap_persist:<id> 对消息可用，优先用该 ID 替代内容哈希"
+    ],
+    "channel_message_id_source": "scrubbed-fingerprint",
+    "$comment_channel_message_id": "飞鸽界面不提供平台消息 ID。bridgeProtocol 的 message.inbound.channelMessageId 只能由本地指纹充当，因此指纹稳定性是正确性关键属性。加固完成前不要接入生产入库。"
+  },
+
+  "readonly_policy": {
+    "allowed": ["UIA 属性读取", "TextPattern.GetText", "ValuePattern.Value", "Win32 查询类 API"],
+    "forbidden": [
+      "Invoke/Toggle/Select/SetValue 等变更类 Pattern",
+      "SendKeys/SendInput/鼠标注入",
+      "触碰 im-input-box",
+      "OCR/截图",
+      "进程注入/内存读取",
+      "抓包",
+      "读取 Cookie/凭据/客户端数据库"
+    ]
+  }
+}

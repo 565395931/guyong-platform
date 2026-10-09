@@ -63,6 +63,30 @@ function createLeaseService({
       })
     },
 
+    /**
+     * 取回本节点自己名下的租约。
+     *
+     * acquire() 遇到未过期租约会**无条件**抛 ACCOUNT_LEASE_CONFLICT——即使持有者
+     * 就是本节点。而节点重启或快速重连时旧租约通常还没到 45 秒 TTL，于是最长有
+     * 45 秒拿不到租约（实测：dry-run 之后紧接着正式启动就复现了）。
+     *
+     * 这里允许"持有者是同一个节点"时直接重发租约：generation 递增、换新令牌，
+     * 语义与 acquire 一致，只是不再把自己挡在门外；持有者是别的节点仍然拒绝。
+     */
+    reclaim({ accountId, nodeId }) {
+      return repository.withLeaseLock(accountId, async context => {
+        assertBinding(context, nodeId)
+        const current = context.lease
+        if (current && Number(current.nodeId) !== Number(nodeId)) {
+          throw new BridgeDomainError('ACCOUNT_LEASE_CONFLICT', 'Account is leased to another node')
+        }
+        const { lease, leaseToken, audit } = newLease(context, accountId, nodeId, 'lease.reclaim')
+        await context.saveLease(lease)
+        await context.writeAudit(audit)
+        return { accountId, nodeId, generation: lease.generation, leaseToken, expiresAt: lease.expiresAt }
+      })
+    },
+
     renew({ accountId, nodeId, leaseToken, generation }) {
       return repository.withLeaseLock(accountId, async context => {
         assertBinding(context, nodeId)

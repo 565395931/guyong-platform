@@ -26,7 +26,7 @@
             <el-tag v-if="isGroupConversation" type="success" size="small" effect="plain" style="margin-left: 4px;">
               群聊
             </el-tag>
-            <el-tag v-if="conversation.pool_type" :type="poolTagType(conversation.pool_type)" size="small" effect="dark" style="margin-left: 4px;">
+            <el-tag v-if="conversation.pool_type && conversation.pool_type !== 'ai_self'" :type="poolTagType(conversation.pool_type)" size="small" effect="dark" style="margin-left: 4px;">
               {{ poolLabel(conversation.pool_type) }}
             </el-tag>
             <el-tag v-if="conversation.conv_status" :type="statusTagType(conversation.conv_status)" size="small" effect="plain" style="margin-left: 4px;">

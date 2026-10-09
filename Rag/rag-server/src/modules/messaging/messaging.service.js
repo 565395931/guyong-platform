@@ -1379,20 +1379,26 @@ async function sendAiReply(message, eventEmitter) {
       }
     }
 
-    // 2. 存储消息（direction=outbound, sender_type=ai, send_status=sent）
+    // 2. 存储消息（direction=outbound, sender_type=ai）
+    // ⚠️ send_status 以前是**写死 'sent'** 的：即使调用方刚刚记录了发送失败，
+    // 这条 AI 回复照样标成"已发送"。后果有两个——坐席看到假的绿勾；前端拿不到
+    // 在途/失败状态，AI 回复的气泡既没有转圈也不会标红，跟手动发送的表现对不上。
+    // 现在由调用方通过 message.sendStatus 告知真实结果（默认 'sent' 保持兼容）。
+    const aiSendStatus = message.sendStatus || 'sent'
     const messageId = message.id || crypto.randomUUID()
     await sequelize.query(
       `INSERT INTO plat_messages
         (id, conversation_id, channel, account_id, user_id, direction, sender_type, message_type, content, send_status, created_at, updated_at)
        SELECT :messageId, :conversationId, c.channel, c.account_id, c.user_id, 'outbound', 'ai',
-              :messageType, :content, 'sent', NOW(), NOW()
+              :messageType, :content, :sendStatus, NOW(), NOW()
        FROM conversations c WHERE c.id = :conversationId`,
       {
         replacements: {
           messageId,
           conversationId: message.conversationId,
           messageType: message.messageType || 'text',
-          content: JSON.stringify(contentForStore)
+          content: JSON.stringify(contentForStore),
+          sendStatus: aiSendStatus
         }
       }
     )
@@ -1428,7 +1434,7 @@ async function sendAiReply(message, eventEmitter) {
       eventEmitter.emit(INTERNAL_EVENTS.MESSAGE_UPDATE, {
         conversationId: message.conversationId,
         messageId,
-        sendStatus: 'sent'
+        sendStatus: aiSendStatus
       })
       // 推送 AI 回复为新消息，坐席可在工作台实时看到（带 senderType='ai' 标识）
       eventEmitter.emit(INTERNAL_EVENTS.NEW_MESSAGE, {
@@ -1438,7 +1444,7 @@ async function sendAiReply(message, eventEmitter) {
         senderType: 'ai',
         messageType: message.messageType || 'text',
         content: contentForStore,
-        sendStatus: 'sent',
+        sendStatus: aiSendStatus,
         serverTimestamp: Date.now()
       })
     }

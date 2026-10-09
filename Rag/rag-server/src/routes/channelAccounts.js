@@ -11,6 +11,10 @@
  */
 
 const express = require('express')
+const path = require('path')
+const { execFile } = require('child_process')
+const { promisify } = require('util')
+const execFileAsync = promisify(execFile)
 const router = express.Router()
 const { createAuthenticate } = require('../middleware/authenticate')
 const { ChannelAccount } = require('../models')
@@ -49,6 +53,10 @@ const {
   parseKuaishouAccountConfig,
   prepareKuaishouAccountCreation
 } = require('../modules/channel-adapters/kuaishou-commerce/kuaishouAccountConfig')
+const {
+  prepareDesktopBridgeAccountCreation
+} = require('../modules/channel-adapters/desktop-bridge/desktopBridgeAccountConfig')
+const { createBridgeRepository } = require('../modules/desktop-bridge/bridgeRepository')
 const { getAdapter } = require('../modules/channel-adapters')
 const registry = require('../modules/waha-registry')
 const { CHANNEL_CODE_PATTERN, normalizeKnowledgeMetadata } = require('../modules/rag/knowledgeScope')
@@ -59,6 +67,27 @@ const {
 } = require('./channelAccounts.presenter')
 
 const DEFAULT_WAHA_ENGINE = String(process.env.WAHA_ENGINE || 'gows').trim().toLowerCase() === 'webjs' ? 'webjs' : 'gows'
+
+// 本机飞鸽检测探针（只读 UIA）。默认路径按仓库结构推导，可用环境变量覆盖。
+function resolveProbeScript() {
+  if (process.env.FEIGE_PROBE_PATH) return process.env.FEIGE_PROBE_PATH
+  return path.join(__dirname, '..', '..', '..', 'tools', 'feige-uia-probe', 'detect.py')
+}
+
+/**
+ * 解析探针输出。探针失败时**仍然打印 JSON 并以非零码退出**，
+ * 因此不能只靠 try/catch 判断，必须优先读 error.stdout。
+ */
+function parseProbeStdout(stdout) {
+  const text = String(stdout || '').trim()
+  if (!text) return null
+  const lastLine = text.split(/\r?\n/).filter(Boolean).pop()
+  try {
+    return JSON.parse(lastLine)
+  } catch {
+    return null
+  }
+}
 
 function normalizeChannelCode(code = '') {
   return String(code || '').trim().toLowerCase()
@@ -230,7 +259,65 @@ router.patch('/channels/:code', async (req, res) => {
   }
 })
 
-router.post('/', async (req, res) => {
+  // 检测本机飞鸽客户端，供「本地桌面客户端」接入方式使用。
+  // 只调用只读探针（UIA 元素树读取），不点击、不输入、不发送消息。
+  // 前提是后端与飞鸽客户端同机。
+  router.post('/detect-desktop', async (req, res) => {
+    const pythonBin = process.env.FEIGE_PROBE_PYTHON || 'python'
+    const probeScript = resolveProbeScript()
+    const timeoutMs = Number(process.env.FEIGE_PROBE_TIMEOUT_MS || 40000)
+
+    try {
+      const { stdout } = await execFileAsync(pythonBin, ['-X', 'utf8', probeScript], {
+        timeout: timeoutMs,
+        windowsHide: true,
+        maxBuffer: 2 * 1024 * 1024
+      })
+      const parsed = parseProbeStdout(stdout)
+      if (!parsed) {
+        return res.status(502).json({ success: false, message: '检测探针返回了无法解析的输出' })
+      }
+      if (!parsed.ok) {
+        return res.status(422).json({
+          success: false,
+          message: parsed.error && parsed.error.reason ? parsed.error.reason : '未检测到本地客户端',
+          detail: parsed.error || null
+        })
+      }
+      return res.json({ success: true, data: parsed })
+    } catch (error) {
+      // 探针失败时也会输出结构化 JSON，优先把它透出去而不是报 500
+      const parsed = parseProbeStdout(error.stdout)
+      if (parsed && parsed.error) {
+        return res.status(422).json({
+          success: false,
+          message: parsed.error.reason || '未检测到本地客户端',
+          detail: parsed.error
+        })
+      }
+      if (error.code === 'ENOENT') {
+        return res.status(503).json({
+          success: false,
+          message: `未找到 Python 解释器（${pythonBin}），请安装或在 FEIGE_PROBE_PYTHON 中指定路径`,
+          detail: { code: error.code, probeScript }
+        })
+      }
+      if (error.killed || error.signal) {
+        return res.status(504).json({
+          success: false,
+          message: `检测超时（${timeoutMs}ms），客户端可能未运行或元素树未就绪`,
+          detail: { signal: error.signal || null }
+        })
+      }
+      return res.status(500).json({
+        success: false,
+        message: '检测失败',
+        detail: { code: error.code || null, message: error.message }
+      })
+    }
+  })
+
+  router.post('/', async (req, res) => {
   try {
     const { channel, account_name, config, adapter_type, max_daily_quota, knowledge_scope, knowledge_channels } = req.body
 
@@ -249,7 +336,29 @@ router.post('/', async (req, res) => {
 
     let fullConfig = { ...config }
 
-    if (channelCode === 'douyin') {
+    // 接入方式：官方 API（默认，走 App Key）／本地桌面客户端（走本机检测信息）
+    const connectionMode = typeof req.body.connection_mode === 'string'
+      ? req.body.connection_mode.trim()
+      : ''
+    let bridgeBinding = null
+
+    if (connectionMode === 'desktop_bridge') {
+      try {
+        const prepared = prepareDesktopBridgeAccountCreation({ config })
+        adapterType = prepared.adapterType
+        fullConfig = prepared.config
+        // adapterId 供 desktop_bridge_bindings 使用（绑定表要求 adapter_id 非空）
+        bridgeBinding = { adapterId: prepared.adapterId }
+      } catch (error) {
+        if (error.code === 'DESKTOP_BRIDGE_ACCOUNT_CONFIG_INVALID') {
+          return res.status(400).json({ success: false, message: error.message, fields: error.fields })
+        }
+        throw error
+      }
+    }
+
+    // 选了桌面客户端就不再走官方 App Key 校验（两条互斥的接入路径）
+    if (connectionMode !== 'desktop_bridge' && channelCode === 'douyin') {
       try {
         const prepared = prepareDouyinAccountCreation({ adapter_type, config })
         adapterType = prepared.adapterType
@@ -385,7 +494,7 @@ router.post('/', async (req, res) => {
     }, channelCode)
 
     // 存入数据库
-    const account = await ChannelAccount.create({
+    const accountPayload = {
       channel: channelCode,
       account_name,
       config: encryptedConfig,
@@ -394,7 +503,28 @@ router.post('/', async (req, res) => {
       max_daily_quota: max_daily_quota || 1000,
       knowledge_scope: knowledgeMetadata.knowledgeScope,
       knowledge_channels: knowledgeMetadata.knowledgeChannels
-    })
+    }
+
+    // 桌面桥接账号必须与绑定行同事务落库：绑定缺失时 leaseService.acquire
+    // 一定会抛 ACCOUNT_NOT_BOUND，账号等于不可用。两者要么都成功，要么都回滚。
+    let account
+    if (bridgeBinding) {
+      const bridgeRepository = createBridgeRepository(sequelize)
+      account = await sequelize.transaction(async transaction => {
+        const created = await ChannelAccount.create(accountPayload, { transaction })
+        await bridgeRepository.upsertBinding({
+          channelAccountId: created.id,
+          adapterId: bridgeBinding.adapterId,
+          mode: 'desktop_bridge',
+          enabled: 1,
+          actorId: req.user && req.user.id ? req.user.id : null,
+          transaction
+        })
+        return created
+      })
+    } else {
+      account = await ChannelAccount.create(accountPayload)
+    }
 
     // 启动 WAHA Session（使用 Registry 统一启动，自动传入正确的 webhook 配置）
     if (adapterType === 'waha' && channelCode === 'whatsapp') {

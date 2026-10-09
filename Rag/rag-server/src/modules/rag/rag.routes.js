@@ -784,6 +784,19 @@ const suggestionStreamHandler = async (req, res) => {
   const { msgId } = req.params;
   const { regenerate = false, model, temperature, topK = 5 } = req.body || {};
 
+  // 开关：未启用时直接返回，不调用模型。
+  // 原因：没有配置模型凭据时每次请求都抛 InvalidCredentials 并在日志刷一条错误，
+  // 而它会被新消息触发，噪音很大还掩盖真实问题。
+  // 开关现在从**配置页**读（数据库优先，回退 AI_SUGGESTION_ENABLED），改了立即生效，
+  // 不必改 .env 再重启。
+  if (!await require('../../services/aiSettings').isAiSuggestionEnabled()) {
+    return res.status(503).json({
+      success: false,
+      code: 'SUGGESTION_DISABLED',
+      message: 'AI 推荐回答未启用。请在「系统设置 → AI 配置」打开「AI 推荐回答」并配置模型凭据。'
+    });
+  }
+
   console.log('[Suggestion] 生成推荐，msgId:', msgId, 'regenerate:', regenerate);
 
   try {
@@ -953,7 +966,8 @@ const suggestionStreamHandler = async (req, res) => {
     })}\n\n`);
 
     // 5. 从配置读取默认模型（非 regenerate 时用配置的默认模型）
-    const defaultSuggestModel = await configService.getConfig('ai_suggest_model') || DASHSCOPE_MODEL;
+    // 运行时取「默认模型」（原来是模块加载时读死的 env）
+    const defaultSuggestModel = await configService.getConfig('ai_suggest_model') || await require('../../services/aiSettings').getChatModel();
     const useModel = model || defaultSuggestModel;
 
     // 6. 通过限流器调用推荐生成器（限流器包裹整个生成+流式写入过程）

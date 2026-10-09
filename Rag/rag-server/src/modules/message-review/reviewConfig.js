@@ -20,6 +20,15 @@ function stringValue(key, value) {
   return value.trim()
 }
 
+// 可选字符串：允许清空（百炼的 app 标识、自定义接口地址等不是必填，
+// 留空表示"回退到 .env 或内置默认值"）
+function optionalStringValue(key, value) {
+  if (typeof value !== 'string' || value.length > 300) {
+    throw new Error(`${key} must be a string no longer than 300 characters`)
+  }
+  return value.trim()
+}
+
 function numberValue(key, value, min, max, integer = false) {
   if (!Number.isFinite(value) || (integer && !Number.isInteger(value)) || value < min || value > max) {
     const kind = integer ? 'integer' : 'number'
@@ -51,6 +60,14 @@ const PUBLIC_AI_SCHEMA = Object.freeze({
   llm_context_message_count: (value) => numberValue('llm_context_message_count', value, 0, 100, true),
   rag_context_message_count: (value) => numberValue('rag_context_message_count', value, 0, 20, true),
   translation_context_message_count: (value) => numberValue('translation_context_message_count', value, 0, 10, true),
+  // ===== 接口与默认模型（原先只能改 .env，且代码在模块加载时读死，不重启不生效） =====
+  ai_chat_base_url: (value) => optionalStringValue('ai_chat_base_url', value),
+  ai_chat_model: (value) => optionalStringValue('ai_chat_model', value),
+  ai_suggestion_enabled: (value) => booleanValue('ai_suggestion_enabled', value),
+  // ===== 百炼（阿里云 DashScope）应用标识：知识库上传/解析要用 =====
+  bailian_workspace_id: (value) => optionalStringValue('bailian_workspace_id', value),
+  bailian_index_id: (value) => optionalStringValue('bailian_index_id', value),
+  bailian_category_id: (value) => optionalStringValue('bailian_category_id', value),
   ...REVIEW_SCHEMA
 })
 

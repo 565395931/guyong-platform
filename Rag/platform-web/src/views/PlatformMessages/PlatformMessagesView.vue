@@ -45,8 +45,8 @@
     <div v-if="showDesktopBridgeStatus" class="desktop-bridge-status" role="status">
       <el-icon><Monitor /></el-icon>
       <div>
-        <strong>需要在线桌面节点</strong>
-        <span>官方接口不提供客服聊天收发，节点接入前会话保持只读。</span>
+        <strong>{{ desktopBridgeStatusTitle }}</strong>
+        <span>{{ desktopBridgeStatusText }}</span>
       </div>
     </div>
 
@@ -56,8 +56,8 @@
         :key="viewKey"
         :channel-code="selectedChannel"
         :account-id="selectedAccountId"
-        :read-only-channels="DESKTOP_BRIDGE_CHANNELS"
-        read-only-reason="需要在线桌面节点，当前会话暂不可发送"
+        :read-only-channels="readOnlyChannels"
+        read-only-reason="该渠道尚未接入桌面节点，当前会话暂不可发送"
         embedded
       />
       <ChannelEventsView
@@ -96,6 +96,7 @@ import {
   normalizeMessageFilters,
   requiresDesktopBridge
 } from '@/modules/platformMessages/platformFilters'
+import { DESKTOP_BRIDGE_SENDABLE_CHANNELS } from '@/modules/channels/desktopBridgeAccountForm'
 
 const route = useRoute()
 const router = useRouter()
@@ -129,6 +130,29 @@ const customerDrawerVisible = computed({
 
 const showDesktopBridgeStatus = computed(() =>
   selectedView.value === 'conversations' && requiresDesktopBridge(selectedChannel.value)
+)
+
+/**
+ * 仍标只读的渠道 = 需要桌面桥接、但发送通道还没实现的那些。
+ * 抖音已打通（服务端指令队列 -> 本机节点 -> 写入飞鸽），所以从只读名单里去掉；
+ * 其余渠道的适配器仍返回 bridge_required，继续只读以免用户点了发送只得到失败。
+ */
+const readOnlyChannels = computed(() =>
+  DESKTOP_BRIDGE_CHANNELS.filter(channel => !DESKTOP_BRIDGE_SENDABLE_CHANNELS.includes(channel))
+)
+
+const desktopBridgeSendReady = computed(() =>
+  DESKTOP_BRIDGE_SENDABLE_CHANNELS.includes(selectedChannel.value)
+)
+
+const desktopBridgeStatusTitle = computed(() =>
+  desktopBridgeSendReady.value ? '桌面节点已接入' : '需要在线桌面节点'
+)
+
+const desktopBridgeStatusText = computed(() =>
+  desktopBridgeSendReady.value
+    ? '客户消息实时同步到本地；发送经本机节点写入客户端。节点需保持运行且客户端窗口不要最小化。'
+    : '官方接口不提供客服聊天收发，该渠道尚未接入桌面节点，当前会话保持只读。'
 )
 const viewKey = computed(() => [
   selectedView.value,

@@ -182,7 +182,8 @@ async function checkComplexity(messageText, config) {
   try {
     // 确保 createChatModel 已加载
     getLangchainService()
-    const model = config.complexity_check_model || DASHSCOPE_MODEL
+    // 运行时取「默认模型」：配置页改了立即生效（原来是模块加载时读死的 env）
+    const model = config.complexity_check_model || await require('../../services/aiSettings').getChatModel()
 
     // 构建分类专用 system prompt
     const systemPrompt = `你是一个客服消息分类助手。请判断以下客户消息是属于"简单/标准化问题"还是"复杂/紧急/需人工问题"。

@@ -21,6 +21,14 @@ export function createChannelAccount(data) {
   return request.post('/v1/channel-accounts', data)
 }
 
+/**
+ * 检测本机运行的桌面客服客户端（目前为抖店飞鸽），用于「本地桌面客户端」接入方式。
+ * 后端调用只读 UIA 探针，不点击、不发送。前提是后端与客户端同机。
+ */
+export function detectDesktopAccount() {
+  return request.post('/v1/channel-accounts/detect-desktop', {}, { timeout: 60000 })
+}
+
 export function deleteChannelAccount(id) {
   return request.delete(`/v1/channel-accounts/${id}`)
 }

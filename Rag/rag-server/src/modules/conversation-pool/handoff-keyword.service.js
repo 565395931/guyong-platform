@@ -167,7 +167,8 @@ async function matchBySemanticIntent({
     const model = config.ai_transfer_keyword_match_model ||
       config.ai_reply_validation_model ||
       config.ai_self_reply_model ||
-      DASHSCOPE_MODEL
+      // 运行时取「默认模型」：配置页改了立即生效（原来是模块加载时读死的 env）
+      await require('../../services/aiSettings').getChatModel()
 
     const systemPrompt = `你是客服会话路由助手。后台只维护中文"转人工关键词"，但客户消息可能使用任何语言。
 

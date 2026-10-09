@@ -36,6 +36,7 @@ const express = require('express')
 const { randomUUID } = require('crypto')
 const router = express.Router()
 const { sequelize } = require('../config/database')
+const { QueryTypes } = require('sequelize')
 const { createAuthenticate } = require('../middleware/authenticate')
 const messagingService = require('../modules/messaging/messaging.service')
 const poolService = require('../modules/conversation-pool/pool.service')
@@ -1376,8 +1377,14 @@ router.get('/', async (req, res) => {
     } else if (status) {
       conditions.push('c.conv_status = :convStatus')
       namedReplacements.convStatus = status
-    } else {
-      // 默认排除已归档（非归档 Tab 不显示归档会话）
+    } else if (pool_type !== POOL_TYPE.PRIVATE) {
+      // 默认排除已归档（非归档 Tab 不显示归档会话）。
+      //
+      // ⚠️「我的」例外：归档只写 conv_status='archived' + status='closed'，
+      // **不动 pool_type / claimed_by**（三条归档路径 accountSnapshotService、
+      // bridgeExpiryService、POST /:id/archive 都是如此），认领关系天然保留。
+      // 所以这里不做归档过滤，同一个会话就能同时出现在「我的」和「已归档」
+      // 两个 Tab 里——这正是需求"归档后各显示一份"。长期跟进池仍按默认排除。
       conditions.push("c.conv_status != 'archived'")
     }
     if (search) {
@@ -1472,6 +1479,10 @@ router.put('/ai-config/:key', async (req, res) => {
     const operatorId = req.user.id || req.user.userId
     const result = await configService.updatePublicAiConfig(req.params.key, req.body.value, operatorId)
     if (!result.success) return res.status(500).json({ success: false, message: result.message })
+    // 少数模块是按 process.env **现取**这些值的（langchain 的接口地址、百炼客户端凭据等）。
+    // 保存时同步一份，配置页改完立即生效，不必改 .env 再重启。
+    const mirror = AI_CONFIG_ENV_MIRROR[req.params.key]
+    if (mirror) process.env[mirror] = String(req.body.value ?? '')
     res.json({ success: true, message: 'AI configuration updated' })
   } catch (error) {
     if (/not editable|must be/.test(error.message)) {
@@ -1487,6 +1498,17 @@ function requireAiProviderAdmin(req, res) {
   res.status(403).json({ success: false, message: 'Only administrators can manage AI providers' })
   return false
 }
+
+
+// 配置页的键 → 对应的环境变量名（保存时同步，见 /ai-config/:key）
+const AI_CONFIG_ENV_MIRROR = Object.freeze({
+  ai_chat_base_url: 'DASHSCOPE_BASE_URL',
+  ai_chat_model: 'DASHSCOPE_MODEL',
+  ai_suggestion_enabled: 'AI_SUGGESTION_ENABLED',
+  bailian_workspace_id: 'WORKSPACE_ID',
+  bailian_index_id: 'INDEX_ID',
+  bailian_category_id: 'CATEGORY_ID'
+})
 
 function aiProviderService() {
   return require('../modules/ai-provider/providerService').getProviderService()
@@ -1532,6 +1554,37 @@ router.get('/ai-provider/balance', async (req, res) => {
   if (!requireAiProviderAdmin(req, res)) return
   try { res.json({ success: true, data: await aiProviderService().getBalance() }) }
   catch (error) { res.status(400).json({ success: false, message: error.message }) }
+})
+
+// ========== 百炼（阿里云）应用凭据 ==========
+// AccessKeyId / AccessKeySecret 密文存配置表，接口只回掩码。
+// 原先这两个值只能在 .env 里填，而 .env 里是空的、页面上又填不了。
+function bailianService() {
+  return require('../modules/ai-provider/bailianCredentialService').getBailianCredentialService()
+}
+
+router.get('/bailian-credential', async (req, res) => {
+  if (!requireAiProviderAdmin(req, res)) return
+  try { res.json({ success: true, data: await bailianService().getStatus() }) }
+  catch (error) { res.status(500).json({ success: false, message: error.message }) }
+})
+
+router.put('/bailian-credential', async (req, res) => {
+  if (!requireAiProviderAdmin(req, res)) return
+  try {
+    const result = await bailianService().saveCredential(req.body || {}, req.user.id || req.user.userId)
+    if (!result.success) throw new Error(result.message)
+    res.json({ success: true, data: await bailianService().getStatus(), message: '已保存' })
+  } catch (error) { res.status(400).json({ success: false, message: error.message }) }
+})
+
+router.delete('/bailian-credential', async (req, res) => {
+  if (!requireAiProviderAdmin(req, res)) return
+  try {
+    const result = await bailianService().clearCredential(req.user.id || req.user.userId)
+    if (!result.success) throw new Error(result.message)
+    res.json({ success: true, data: await bailianService().getStatus(), message: '已清除' })
+  } catch (error) { res.status(400).json({ success: false, message: error.message }) }
 })
 
 /**
@@ -2086,8 +2139,19 @@ router.get('/:id/messages', async (req, res) => {
 
     // 取最新的 N 条消息（DESC LIMIT），再按时间正序排列（ASC）供前端展示
     // 这样聊天窗口始终展示最新消息，而不是最旧的
+    //
+    // ⚠️ created_at 必须用 DATE_FORMAT 按**墙上时间**输出，不能直接返回 DATETIME：
+    // 连接配置是 `timezone: '+00:00'`（config/database.js），Sequelize 会把库里的
+    // 本地时间当成 UTC，JSON 化后前端再 +8 小时 → 整屏消息时间偏到 8 小时之后。
+    // 后果不只是时间显示错：前端按时间戳排序，而 WebSocket 推送用的是真实时间
+    // （`timestamp: new Date()`），两条路径差 8 小时 → 刚发出的消息会被排到历史
+    // 中间，用户在当前滚动位置看不到，表现为"发送后没反应，重新点一次会话才出现"。
+    // DATE_FORMAT 输出无时区的字符串，前端按本地时间解析，两条路径就对齐了。
     const [rows] = await sequelize.query(
-      `SELECT * FROM (
+      `SELECT id, conversation_id, channel, direction, sender_type, message_type, content,
+              send_status,
+              DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%s') AS created_at
+       FROM (
          SELECT id, conversation_id, channel, direction, sender_type, message_type, content,
                 send_status, created_at
          FROM plat_messages
@@ -2347,7 +2411,39 @@ router.post('/:id/messages', async (req, res) => {
       messageType: messageType || 'text',
       content: messageContent
     }
-    if (cloudDispatcher) {
+
+    // 桌面桥接账号（adapter_type='desktop_bridge'）必须先于云网关判断。
+    // 否则会掉进云网关兜底，那里按**渠道**解析适配器 → 拿到官方适配器
+    // （如抖音的 douyin_commerce），它必然返回"开放平台未提供客服消息 API"。
+    // 这就是"发送到 WhatsApp 失败 + 抖音限制文案"那条错误的来源。
+    const bridgeAccountRows = outboundAccountId
+      ? await sequelize.query(
+        'SELECT adapter_type FROM channel_accounts WHERE id = :id',
+        { replacements: { id: outboundAccountId }, type: QueryTypes.SELECT }
+      )
+      : []
+    const isDesktopBridgeAccount = Boolean(
+      bridgeAccountRows[0] && bridgeAccountRows[0].adapter_type === 'desktop_bridge'
+    )
+
+    if (isDesktopBridgeAccount) {
+      const { getAdapter } = require('../modules/channel-adapters')
+      const bridgeAdapter = getAdapter('desktop_bridge')
+      if (bridgeAdapter) {
+        sendResult = await bridgeAdapter.sendMessage(
+          outboundAccountId,
+          conv.user_id,
+          { content: messageContent, messageType: messageType || 'text' }
+        )
+        if (!sendResult.success) {
+          console.error(`[Conversations] 桌面桥接发送失败 (conv=${id}):`, sendResult.error)
+        } else {
+          console.log(`[Conversations] 桌面桥接发送成功 (conv=${id})`)
+        }
+      } else {
+        sendResult = { success: false, error: '桌面桥接适配器未初始化（检查 BRIDGE_ENABLED）' }
+      }
+    } else if (cloudDispatcher) {
       try {
         sendResult = await cloudDispatcher.dispatch(cloudPayload)
         if (!sendResult.success && conv.channel === 'whatsapp' && isSelfRecipientSendResult(sendResult)) {
@@ -2476,9 +2572,12 @@ router.post('/:id/messages', async (req, res) => {
     }
 
     if (!sendResult.success) {
+      // 文案不要硬编码 WhatsApp —— 抖店等渠道发送失败时也曾显示"发送到 WhatsApp 失败"，
+      // 极具误导性（实测踩过）。按实际渠道名回报。
+      const channelLabel = { whatsapp: 'WhatsApp', douyin: '抖店', wechat: '微信', wecom_kf: '企业微信' }[conv.channel] || conv.channel
       return res.status(502).json({
         success: false,
-        message: '消息已记录但发送到 WhatsApp 失败: ' + (sendResult.error || '未知错误'),
+        message: `消息已记录但发送到 ${channelLabel} 失败: ` + (sendResult.error || '未知错误'),
         data: {
           ...result,
           content: messageContent,

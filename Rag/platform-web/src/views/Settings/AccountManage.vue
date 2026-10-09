@@ -1,5 +1,12 @@
 <template>
   <div :class="['account-manage-view', { 'account-manage-view--embedded': props.embedded }]">
+    <!-- 渠道连不上：整条横幅闪红光。
+         注意放在 embedded 判断之外——工作台里的账号管理是**嵌入**渲染的
+         （account-manage-view--embedded），只写在非嵌入的筛选条里就等于不显示。 -->
+    <div v-if="abnormalChannelInScope" class="account-manage-view__channel-alert" role="status">
+      渠道「{{ abnormalChannelLabel }}」连不上（本地客户端未连接），暂时无法收发消息
+    </div>
+
     <header v-if="!props.embedded" class="account-manage-view__header">
       <div>
         <h3 class="account-manage-view__title">渠道账号管理</h3>
@@ -27,7 +34,13 @@
           :key="channel.code"
           :label="channel.label"
           :value="channel.code"
-        />
+        >
+          <span class="account-manage-view__option-label">
+            <span>{{ channel.label }}</span>
+            <!-- 渠道连不上：下拉里也要能看出来，否则选中之前完全无感 -->
+            <span v-if="isChannelAbnormal(channel.code)" class="account-manage-view__option-alert">连不上</span>
+          </span>
+        </el-option>
       </el-select>
     </div>
 
@@ -92,13 +105,6 @@
               </el-tag>
             </template>
             <span v-else class="account-meta">不适用</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column label="今日配额" width="150">
-          <template #default="{ row }">
-            <span class="quota-value">{{ row.daily_quota || 0 }}</span>
-            <span class="account-meta"> / {{ row.max_daily_quota || 0 }}</span>
           </template>
         </el-table-column>
 
@@ -190,6 +196,18 @@
 
         <template v-if="addForm.channel === 'douyin'">
           <div class="credential-section">
+            <div class="credential-section__title">接入方式</div>
+            <el-form-item label="接入方式" prop="connectionMode">
+              <el-radio-group v-model="addForm.connectionMode">
+                <el-radio-button value="official_api">官方 API（App Key）</el-radio-button>
+                <el-radio-button value="desktop_bridge">本地桌面客户端</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+          </div>
+        </template>
+
+        <template v-if="addForm.channel === 'douyin' && !useDesktopBridge">
+          <div class="credential-section">
             <div class="credential-section__title">抖店开放平台凭据</div>
             <div class="form-grid">
               <el-form-item label="App Key" prop="appKey">
@@ -211,6 +229,45 @@
             <p class="credential-section__notice">
               抖店官方目前未开放飞鸽客服收发消息 API，本系统只接订单/售后/商品事件。
             </p>
+          </div>
+        </template>
+
+        <template v-if="useDesktopBridge">
+          <div class="credential-section">
+            <div class="credential-section__title">本机客户端检测</div>
+            <p class="credential-section__notice">
+              读取本机运行的抖店飞鸽客户端元素树，全程只读：不点击界面、不写入内容。需后端与客户端在同一台电脑。
+            </p>
+            <div class="detect-row">
+              <el-button :loading="detecting" @click="handleDetect">
+                {{ addForm.detection ? '重新检测' : '自动检测' }}
+              </el-button>
+              <span v-if="detecting" class="detect-row__hint">
+                正在检测，客户端冷启动时可能需要十几秒…
+              </span>
+            </div>
+            <el-alert
+              v-if="detectionError"
+              type="error"
+              :closable="false"
+              :title="detectionError"
+              show-icon
+              class="detect-alert"
+            />
+            <div v-if="addForm.detection" class="detect-result">
+              <div class="detect-result__row">
+                <span>店铺</span><strong>{{ addForm.detection.shopName }}</strong>
+              </div>
+              <div class="detect-result__row">
+                <span>客服状态</span><strong>{{ addForm.detection.agentStatus || '—' }}</strong>
+              </div>
+              <div class="detect-result__row">
+                <span>会话数</span><strong>{{ addForm.detection.conversationCount ?? '—' }}</strong>
+              </div>
+              <div class="detect-result__row">
+                <span>本机</span><strong>{{ addForm.detection.hostName || '—' }}</strong>
+              </div>
+            </div>
           </div>
         </template>
 
@@ -384,16 +441,6 @@
             </p>
           </div>
         </template>
-
-        <el-form-item label="每日事件上限" prop="maxDailyQuota">
-          <el-input-number
-            v-model="addForm.maxDailyQuota"
-            :min="10"
-            :max="100000"
-            :step="100"
-            controls-position="right"
-          />
-        </el-form-item>
       </el-form>
 
       <template #footer>
@@ -405,7 +452,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Delete, Plus, Refresh } from '@element-plus/icons-vue'
@@ -413,6 +460,7 @@ import { CopyDocument, Delete, Plus, Refresh } from '@element-plus/icons-vue'
 import {
   createChannelAccount,
   deleteChannelAccount,
+  detectDesktopAccount,
   getChannelAccounts,
   getChannelDefinitions
 } from '@/api/channels'
@@ -451,7 +499,13 @@ import {
   validateKuaishouAccountForm
 } from '@/modules/channels/kuaishouAccountForm'
 import { resolveAccountChannel } from '@/modules/navigation/channelNavigation'
+import { useChannelHealth } from '@/modules/channels/channelHealth'
 import { connectionModeLabel, getAccountConnectionMode } from '@/modules/accounts/accountDirectory'
+import {
+  DESKTOP_BRIDGE_CONNECTION_MODE,
+  DESKTOP_BRIDGE_DETECTABLE_CHANNELS,
+  createDesktopBridgeAccountForm
+} from '@/modules/channels/desktopBridgeAccountForm'
 
 const props = defineProps({
   channelCode: { type: String, default: '' },
@@ -477,6 +531,9 @@ function resolveFilterChannel(queryChannel = route.query.channel) {
 const initialForm = () => ({
   channel: '',
   accountName: '',
+  // 'official_api' 走 App Key；'desktop_bridge' 走本机客户端检测
+  connectionMode: 'official_api',
+  detection: null,
   appKey: '',
   appSecret: '',
   appId: '',
@@ -491,12 +548,21 @@ const initialForm = () => ({
   maxDailyQuota: 1000
 })
 const addForm = reactive(initialForm())
+const detecting = ref(false)
+const detectionError = ref('')
 
 const requiredRule = message => ({ required: true, message, trigger: 'blur' })
+
+// 桌面桥接接入不需要 App Key，因此这些渠道的官方凭据规则要跳过
+const useDesktopBridge = computed(() =>
+  addForm.connectionMode === DESKTOP_BRIDGE_CONNECTION_MODE &&
+  DESKTOP_BRIDGE_DETECTABLE_CHANNELS.includes(addForm.channel)
+)
+
 const addRules = computed(() => ({
   channel: [{ required: true, message: '请选择渠道', trigger: 'change' }],
   accountName: [requiredRule('请输入账号名称')],
-  ...(addForm.channel === 'douyin' ? {
+  ...(addForm.channel === 'douyin' && !useDesktopBridge.value ? {
     appKey: [requiredRule('请输入 App Key')],
     appSecret: [requiredRule('请输入 App Secret')],
     shopId: [requiredRule('请输入店铺 ID')]
@@ -564,6 +630,20 @@ const channelLabels = Object.freeze({
   kuaishou: '快手小店'
 })
 const capabilityChannelLabel = computed(() => channelLabels[capabilityChannel.value] || '渠道')
+
+// ========== 渠道异常（连不上）提示 ==========
+const channelHealth = useChannelHealth()
+const isChannelAbnormal = channelHealth.isChannelAbnormal
+// 当前这一屏里有没有异常渠道：筛了具体渠道就看那个，否则看全部渠道里有没有异常
+const abnormalChannelInScope = computed(() => {
+  if (filterChannel.value !== 'all') return channelHealth.isChannelAbnormal(filterChannel.value)
+  return channelHealth.channels.value.some(ch => ch.status && ['OFFLINE', 'CRITICAL'].includes(String(ch.status).toUpperCase()))
+})
+const abnormalChannelLabel = computed(() => {
+  if (filterChannel.value !== 'all') return channelLabels[filterChannel.value] || filterChannel.value
+  const bad = channelHealth.channels.value.find(ch => ['OFFLINE', 'CRITICAL'].includes(String(ch.status || '').toUpperCase()))
+  return (bad && (channelLabels[bad.channel] || bad.label)) || '渠道'
+})
 const capabilityHeading = computed(() => `${capabilityChannelLabel.value}开放平台`)
 const accountNamePlaceholders = Object.freeze({
   douyin: '例：抖店华东店',
@@ -662,6 +742,29 @@ async function onChannelChange() {
   ])
 }
 
+async function handleDetect() {
+  detecting.value = true
+  detectionError.value = ''
+  try {
+    const response = await detectDesktopAccount()
+    const data = response?.data || {}
+    if (!data.shopName) {
+      addForm.detection = null
+      detectionError.value = '检测到客户端但读不到店铺名，请确认飞鸽已登录且主窗口未被最小化'
+      return
+    }
+    addForm.detection = { ...data }
+    // 账号名称留空时用店铺名兜底，减少手工输入
+    if (!addForm.accountName) addForm.accountName = data.shopName
+    ElMessage.success(`已检测到店铺：${data.shopName}`)
+  } catch (error) {
+    addForm.detection = null
+    detectionError.value = error?.response?.data?.message || error?.message || '检测失败，请稍后重试'
+  } finally {
+    detecting.value = false
+  }
+}
+
 async function handleSave() {
   if (!addFormRef.value) return
   try {
@@ -671,7 +774,20 @@ async function handleSave() {
   }
 
   let payload
-  if (addForm.channel === 'douyin') {
+  if (useDesktopBridge.value) {
+    const form = createDesktopBridgeAccountForm({ channel: addForm.channel })
+    const input = {
+      accountName: addForm.accountName,
+      detection: addForm.detection,
+      maxDailyQuota: addForm.maxDailyQuota
+    }
+    const errors = form.validate(input)
+    if (errors.length) {
+      ElMessage.warning(errors[0])
+      return
+    }
+    payload = form.buildRequest(input)
+  } else if (addForm.channel === 'douyin') {
     const errors = validateDouyinAccountForm(addForm)
     if (errors.length) {
       ElMessage.warning(errors[0])
@@ -790,6 +906,7 @@ watch([() => props.channelCode, () => route.query.channel], async ([, value]) =>
 })
 
 onMounted(async () => {
+  channelHealth.startPolling()
   try {
     await loadChannels()
     filterChannel.value = resolveFilterChannel()
@@ -798,6 +915,10 @@ onMounted(async () => {
   } catch {
     accountList.value = []
   }
+})
+
+onBeforeUnmount(() => {
+  channelHealth.stopPolling()
 })
 </script>
 
@@ -853,6 +974,35 @@ onMounted(async () => {
 
   &__channel-filter {
     width: 220px;
+  }
+
+  &__option-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  &__option-alert {
+    flex-shrink: 0;
+    padding: 0 6px;
+    border-radius: 8px;
+    background: #fee2e2;
+    border: 1px solid #fecaca;
+    color: #dc2626;
+    font-size: 11px;
+  }
+
+  // 渠道异常横幅：红光呼吸（工作台嵌入渲染时也显示）
+  &__channel-alert {
+    margin-bottom: $spacing-md;
+    padding: 8px 12px;
+    border-radius: $radius-md;
+    border: 1px solid #fca5a5;
+    font-size: 13px;
+    line-height: 20px;
+    color: #b91c1c;
+    animation: account-channel-alert 1.2s ease-in-out infinite;
   }
 
   &__table {
@@ -912,12 +1062,6 @@ onMounted(async () => {
 .account-meta {
   color: $color-text-secondary;
   font-size: 12px;
-}
-
-.quota-value {
-  color: $color-text-primary;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
 }
 
 .callback-address {
@@ -982,6 +1126,49 @@ onMounted(async () => {
   }
 }
 
+/* 桌面桥接接入：自动检测面板 */
+.detect-row {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  padding-top: $spacing-sm;
+
+  &__hint {
+    color: $color-text-secondary;
+    font-size: 12px;
+  }
+}
+
+.detect-alert {
+  margin-top: $spacing-sm;
+}
+
+.detect-result {
+  margin-top: $spacing-md;
+  padding: $spacing-md;
+  border: 1px solid $color-border;
+  border-radius: $radius-sm;
+  background: $color-bg-white;
+
+  &__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: $spacing-md;
+    padding: 2px 0;
+    font-size: 13px;
+
+    span {
+      color: $color-text-secondary;
+    }
+
+    strong {
+      color: $color-text-primary;
+      font-weight: 600;
+    }
+  }
+}
+
 @media (max-width: 720px) {
   .account-manage-view {
     padding: $spacing-md;
@@ -1009,5 +1196,11 @@ onMounted(async () => {
   :deep(.el-dialog) {
     max-width: calc(100vw - 24px);
   }
+}
+
+/* 渠道异常：红光呼吸（避免只靠颜色，色觉差异也能看出变化） */
+@keyframes account-channel-alert {
+  0%, 100% { background: rgba(239, 68, 68, 0.06); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.25); }
+  50% { background: rgba(239, 68, 68, 0.22); box-shadow: 0 0 10px 0 rgba(239, 68, 68, 0.45); }
 }
 </style>

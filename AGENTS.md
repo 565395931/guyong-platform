@@ -113,6 +113,48 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 
 ## 变更记录
 
+### 2026-10-13 — 拼多多客服场景全链路打通（读会话→点开→读消息→回复发送）
+- 改动/发现：①`pdd_client.py` 扩展为完整客服操作工具：`click-text`（OCR 定位文字→提窗→真实点击）、`click-input`（几何定位输入框）、`type-text`（SendInput Unicode 打字，中文免输入法）、`press-enter`、`click-point`（窗口坐标点击）、`read`（截图+OCR）。全程按窗口相对/实时计算坐标，无写死位置。②**真实发送实测通过**：向会话"拼多多米白白"发送测试消息（消息区与会话列表摘要双确认）。③**关键踩坑（已修复）**：客户端窗口不在前台时 Chromium 停止渲染，PrintWindow 截到**停更旧帧**——回车发送后立即截图核对误判"未发出"，导致同一消息重复发送两次；修复为 `capture_and_ocr` 默认校验前台、非前台自动提窗 0.8s 再截（`--no-raise` 可跳过）。今后所有"操作后立即核对"的读取必须先确保窗口前台。④已知边界：短气泡文字 OCR 会漏（需局部裁剪放大识别）、历史消息需滚动拼接（未做）。
+- 位置：`Rag/tools/pinduoduo-uia-probe/{pdd_client.py,REPORT-pinduoduo-uia.md}`（报告新增第 7 节）。
+- 验证：全链路实测（数对话 3 个、点开"拼多多米白白"、读取消息区、输入"我爱你"、回车+按钮两种方式均真实发送成功、会话列表摘要更新为"我爱你"）。
+- 待办：①结构化封装（会话列表/消息区 JSON、滚动读历史）；②未读检测轮询与"客服监控"场景组装；③短气泡/链接/数字的局部放大识别增强。
+
+### 2026-10-13 — 拼多多启动参数透传实验（结论：不可行）+ 视觉路线在新版复验通过
+- 改动/发现：①方案 B（`--force-renderer-accessibility` 启动参数）在 3.7.3.12 上做了干净复测：外壳**不透传未知参数**（浏览器进程 10 秒正常启动但命令行无该参数）；参数模板不在任何根目录 DLL 中（动态/混淆构造，无配置文件入口）；直接启动浏览器进程不可行（外壳私有 IPC 通道 + `--extra-cmd` 加密配置拿不到）；IFEO 注册表劫持理论可行但客户端装有风控组件 `sentinel.exe`，且**每次重启都要重新扫码登录**（两次实测），不建议走。②**本客户端重启不保留登录态**（强制重启后必须手机扫码，实测两次），涉及重启的调试都要用户配合。③视觉路线（截图+OCR）在 3.7.3.12 上复验通过：读取工作台首页 30 行（含"今日咨询人数""买家订单/商品管理/售后退款"模块、"AIEBS汽车用品旗舰店"页签等）；OCR 中文数据经码点校验正确（终端 stdout 的显示乱码与文件数据无关，`pdd_client.py` 已加 stdout 强制 UTF-8）。
+- 位置：`Rag/tools/pinduoduo-uia-probe/{pdd_client.py,REPORT-pinduoduo-uia.md}`（报告新增第 6 节；`out/pdd_browser_cmdline_before/after.txt` 为透传实验存档）。
+- 验证：透传实验（前后命令行对比）、DLL 全目录扫描、新版视觉读取（30 行带坐标，码点校验通过）。
+- 待办：①用户重新登录后，在视觉路线上做结构化读取（先做消息/客服页：会话列表 + 未读 + 消息区；订单侧可优先走官方 API）；②重启保留登录态的优雅关闭方式未验证（下次重启前先试正常退出而非 taskkill）；③UIA 路线仅剩 IFEO 一条（已评估，不推荐，除非将来有官方支持）。
+
+### 2026-10-13 — 拼多多工作台视觉读取打通（截图+OCR）+ 客户端升级 3.7.3.12
+- 改动/发现：①UIA 深度排查：内核 `chrome.dll` 有 `--force-renderer-accessibility` 开关（1 处）但 `UiaClientsAreListening` 等自动唤醒路径被切除（0 处）；系统屏幕阅读器标志 `SPI_SETSCREENREADER` 实测无法唤醒其无障碍树（40 秒无变化，已还原）；无监听端口/调试参数——UIA 路线除非以启动参数强启否则不可用。②**视觉读取路线打通**：`PrintWindow(PW_RENDERFULLCONTENT)` 遮挡可截（无需置顶）+ Windows 自带 OCR（zh-Hans-CN）；过程中发现 PowerShell 5.1 接收 WinRT 字符串会经 ANSI 代码页损坏（UTF-8→GBK），调用前 `chcp 65001` 修复。③新增 `Rag/tools/pinduoduo-uia-probe/{pdd_client.py,ocr.ps1}`（`capture`/`read`，只读），实测读取工作台界面 11 行文本（会话列表等，含坐标）。④客户端自动升级 3.7.2.14 → 3.7.3.12（升级在重启时应用；**升级后需重新登录一次**）；新版内核无障碍字符串与旧版一致。
+- 位置：`Rag/tools/pinduoduo-uia-probe/{pdd_client.py,ocr.ps1,REPORT-pinduoduo-uia.md}`（报告新增第 5 节）。
+- 验证：OCR 实测输出真实界面文本（"官方待办任务群 VIP / 拼多多米白白 / 官方群消息"等 11 行带坐标）；PrintWindow 遮挡场景实测通过；新旧版内核无障碍字符串对照一致；屏幕阅读器标志实验已还原系统设置。
+- 待办：①**用户登录 3.7.3.12 后复验工具**（主窗口类名前缀 `g_wszPDDWindowClass` 是否变化需确认；登录页是原生窗口、无渲染宿主，工作台页才是 Web 内容）；②`--force-renderer-accessibility` 透传实验被升级打断，可重试（需重启客户端，可能再次要求登录，先与用户确认）；③视觉路线的结构化解析（会话列表/消息区/订单表格）与点击自动化（坐标由 OCR 实时定位）按需开发。
+
+### 2026-10-13 — 拼多多工作台 UIA 可行性检测（结论：不可读）+ 千帆待做清单落档
+- 改动/发现：①**拼多多工作台（3.7.2.14，`pddbrowser104` 定制 Chromium 104）UIA 不可读**：主窗口（`g_wszPDDWindowClass{…}`，"拼多多工作台"）下 4 个渲染宿主全部 **0 文本节点**，全窗口扫描（46 个顶层窗口 + 全部渲染宿主）只有窗口框架元素；连续轮询 + 数十分钟间断附加（已远超 Chromium 无障碍树的懒构建预热窗口）始终为 0，判定定制内核未启用/剥离了无障碍支持；相关进程无监听端口、命令行无调试参数（私有 IPC 通道不可用）。新增复检探针 `Rag/tools/pinduoduo-uia-probe/probe.py`（只读，客户端升级后重跑）+ `REPORT-pinduoduo-uia.md`（含证据链与三条备选路线评估）。②千帆链路的未完事项汇总为 `Rag/docs/qianfan-order-pipeline-todo.md`（数据完整性/联调验证/功能扩展/运维/长期维护五组 15 项，供后期排期）。
+- 位置：`Rag/tools/pinduoduo-uia-probe/{probe.py,REPORT-pinduoduo-uia.md,.gitignore}`、`Rag/docs/qianfan-order-pipeline-todo.md`。
+- 验证：探针实测输出稳定（渲染宿主 0 文本 ×4、主窗口 1 文本=自身标题）；结论由多重证据交叉确认（渲染宿主附加/全窗口扫描/长时预热/端口/命令行）。
+- 待办：**拼多多接入路线待决策**——推荐走网页版 `mms.pinduoduo.com` 的浏览器自动化（关键证据：客户端命令行显示它加载的就是 `--ir-url-host=mms.pinduoduo.com --ir-url-path=/web/`，即工作台=该网页+定制外壳，网页版 DOM 完整可读可写；动工需商家账号扫码登录一次）；备选截图+OCR（Windows 自带 OCR 可用，只能读当前可见内容，可靠性明显更低）；订单侧已有官方开放平台通路（`pinduoduo-commerce` 适配器声明订单/售后事件能力，本机未配账号故 `sync_tick_completed accounts:0`），聊天无官方 API。
+
+### 2026-10-13 — 千帆采集订单入库（WS `commerce.orders.scraped` + orders 表幂等 upsert）
+- 改动：①协议新增消息类型 `commerce.orders.scraped`（`bridgeProtocol.js` 的 TYPES / payload schema / envelope 三处）；②网关新增 `orderIngestService` 分发（`bridgeGateway.js`）+ 装配（`desktop-bridge/index.js`、`app.js`）；③新服务 `modules/desktop-bridge/scrapedOrderIngestService.js`：订单行映射（状态词表映射、创建时间归一为 `YYYY-MM-DD HH:MM:SS`、客户字段/raw_payload 全行保留）、**按 order_no 幂等 upsert**（`INSERT ... ON DUPLICATE KEY UPDATE`，每天重采不产生重复行）、新订单写 `order_events` 轨迹、账号按渠道解析 desktop_bridge 账号；④节点 `bridge_node.py`：采集成功后读 latest JSON 上报订单，`event.ack` 回执带入库结果（`新增 N 条、更新 M 条`）记入节点日志；⑤人工补录脚本 `scripts/ingest-scraped-orders.js`（与节点走同一个入库服务）。
+- **数据库运维发现（重要）**：本机 Windows MySQL80 服务（`D:\MySQL\Server80`）是 **9月25日前的遗留实例**——错误日志显示它 9月25日 09:18 正常关停后直到今天机器重启才被自动拉起；而平台自 9月25日采用 Docker MySQL（`rag-mysql` 容器 / `mysql-data` 卷），**平台数据全在 Docker 卷里**（MySQL80 的数据停在 9月25日，且 root 密码与 `.env` 不符）。今天重启后 MySQL80 抢占 3306，导致 `rag-mysql` 无法绑定宿主端口、平台起不来（启动脚本见端口被占会静默跳过 Docker MySQL，后端随即连库失败）。**已停掉 MySQL80**（`net start MySQL80` 可恢复），`rag-mysql` 已正常绑定 3306，`localhost:3306` 用 `.env` 凭据可连。建议把 MySQL80 服务改为手动启动或卸载，避免每次重启复现。
+- 验证：真实采集 18 条全量订单（过程中自愈路径实测生效：客户端被遮挡 → 提窗 → 重试成功）→ 入库 **新增 18 条**；幂等复跑 **更新 18 条、总数与事件数不变**；状态映射实测分布 delivered 2 / closed 12 / cancelled 4，与页面原始状态（已签收 2 / 已完成·已关闭 12 / 取消发货 4）一致；节点生成的 WS 信封经服务端 zod 协议校验通过；后端 **611/611**（基线 599 + 新增 12 用例：入库服务 11 + 协议类型清单）。
+- 待办：①**订单分页未覆盖**——列表页 20 条/页，总数超一页时只采当前页并记告警；②列表页没有商品明细与金额（`order_items`/金额字段为空），需要做订单详情页采集才能补；③运单号/发货仓/商家名称暂存 `raw_payload`，未写 `order_shipments`；④`payment_status` 是推断值（非草稿一律 `paid`），退款场景未区分；⑤**端到端 WS 全链路**（节点与服务端同时在线的定时采集→上报→ack）尚未组合实测，各组件已分别验证；⑥`scripts/cleanup_tables.js` 里有硬编码的 DB 密码兜底值（违反仓库自身的凭据规则），建议清理。
+
+### 2026-10-13 — 千帆订单定时采集（元素级点击）+ 桥接节点多适配器 + 建号渠道参数化
+- 改动：①**千帆订单采集器** `Rag/tools/qianfan-uia-probe/qianfan_orders.py`（新增）：定时点进订单页 → 重置条件+搜索 → 抓取订单表格（11 列全字段：订单号/状态/用户名/用户ID/手机号/商家名称/发货仓/收货地址/运单号/创建时间/操作列表）→ 点回客服页。**点击全部走元素级 UIA 动作（零坐标，不模拟鼠标）**：DoDefaultAction → Invoke，失败则提窗等状态恢复后重试；仅允许点左侧导航与重置条件/搜索，黑名单拒绝误点；try/finally 保证无论成败都点回客服页。②**解除"一台机器一个节点"硬约束**：`bridge_node.py` 的 `ADAPTER_IDS` 扩为 `["doudian.feige","xiaohongshu.qianfan"]`，两个平台共用一个节点（不再需要为千帆单起节点进程——provision 以机指纹幂等，再签发会把旧凭据顶掉）；节点新增千帆订单定时任务（`QIANFAN_ORDERS_ENABLED` / `QIANFAN_ORDERS_AT=HH:MM` / `QIANFAN_ORDERS_TIMEOUT_SECONDS`），子进程隔离执行、同日不重跑、执行期间聊天轮询暂停（飞鸽读界面无状态，恢复后按指纹补读，不丢消息）。③`qianfan-uia-probe/detect.py`（新增）：建号检测探针，单行 JSON 契约与飞鸽一致；机器指纹与飞鸽同算法（实测两平台指纹完全一致，账号绑定同一节点）。④服务端：`desktopBridgeAccountConfig.js` 新增渠道→adapterId 映射（douyin→doudian.feige，xiaohongshu→xiaohongshu.qianfan），prepare 按渠道强制并覆盖 config 里携带的错渠道值；`routes/channelAccounts.js` 检测接口按渠道选探针（`QIANFAN_PROBE_PATH`/`QIANFAN_PROBE_PYTHON`/`QIANFAN_PROBE_TIMEOUT_MS`，旧 `FEIGE_PROBE_*` 保留兼容），建号把 channel 透传给 prepare。
+- 位置：`Rag/tools/qianfan-uia-probe/{qianfan_orders.py,detect.py,qianfan_nav_probe.py,README.md,REPORT-qianfan-capture.md}`、`Rag/tools/feige-uia-probe/bridge_node.py`、`Rag/rag-server/src/modules/channel-adapters/desktop-bridge/desktopBridgeAccountConfig.js`（+测试）、`Rag/rag-server/src/routes/channelAccounts.js`、`src/modules/desktop-bridge/bridgeBinding.test.js`。
+- 验证：**真实采集 18 条订单**两轮全通过（含重置查询、视图还原、落盘）；节点定时任务真实触发（22s/轮，日志完整）+ 同日跳过逻辑验证；detect 探针输出正确（店铺名/在线/指纹）；后端 **599/599** 测试通过（新增 5 用例：按渠道 adapterId、错渠道覆盖、expectedAdapterIdForChannel、检测路由源码断言、建号透传 channel）；千帆工具全部编译通过。
+- 待办：①订单数据目前**只落本机文件**（`qianfan-uia-probe/out/qianfan_orders_*.json`），未接入平台订单投影；②订单分页未覆盖——总数超一页（20 条）时只采当前页并记告警；③采集要求千帆窗口存在且未最小化，锁屏/睡眠下的行为未验证（定时任务建议机器不锁屏）；④前端 `AccountManage.vue` 尚未给小红书开放"本地桌面客户端"接入选项（API 层已支持）；⑤千帆聊天（会话/消息）尚未接入桥接，右侧客户面板与消息区字段待真实会话复测。
+
+### 2026-10-13 — 小红书千帆本地捕捉（新工具目录 + 只读实测）
+- 改动：新增 `Rag/tools/qianfan-uia-probe/`，把抖店飞鸽的本地捕捉流程复刻到小红书千帆客服工作台（进程 `千帆客服工作台.exe`，安装代号 `eva`，V1.2.6）：`qianfan_capture.py`（`enum` 窗口枚举 / `capture` 元素树捕捉 / `selfcheck` 只读自证）、`profiles/xiaohongshu_qianfan.json` 采点配置、`REPORT-qianfan-capture.md`。关键实测结论与飞鸽一致：**必须附加渲染宿主 `Chrome_RenderWidgetHostHWND`**（客服工作台视图实测 97 节点/29 文本，智能客服视图 307/96），从顶层 `Chrome_WidgetWin_1` 附加只有空壳（29/4）。两处与飞鸽不同：主窗口标题是 `eva`（安装目录代号，无店铺信息，不能按标题定位，只能按进程+class+可见）；主窗口下**有两个**渲染宿主（主内容区 + 48px 标题栏条），需按节点数取主内容区。切换左侧导航时渲染宿主 HWND 不变、内容树整体替换（DocumentControl 名即视图标识），捕捉自动跟随并按视图名另存产物。已定位会话列表容器 `farmer-contact-list`（小红书 Walle 设计系统，automation_id 前缀 `walle-`）。
+- 位置：`Rag/tools/qianfan-uia-probe/`（`qianfan_capture.py`、`profiles/xiaohongshu_qianfan.json`、`README.md`、`REPORT-qianfan-capture.md`）。未改任何既有代码。
+- 验证：`selfcheck` PASS（AST 扫描无禁用 API）；两轮全树读取文本完全一致（29/29）；捕捉时千帆在后台（前台是 ZCode）读取正常，不要求前台焦点；隐藏窗口渲染宿主实测只读到 1 节点/0 文本（与飞鸽一致）；两个视图连续捕捉成功（09:36 客服工作台 → 09:38 智能客服，同一渲染宿主）。当前客户端**无进行中会话**（消息区「暂无对话」、会话列表为空），会话项与消息区字段**未验证**。
+- 待办：①有真实会话时重跑 `python qianfan_capture.py capture`，补会话列表项/消息区/未读徽标/右侧栏的字段结构；②确认冷启动预热行为（飞鸽实测 Chromium 无障碍树首次启用约需 15s，千帆未复测）；③识别输入框 automation id（只读流程不触碰，桌面桥接发送流程需要时再识别）。
+
 ### 2026-09-28 — 修「会话已从列表消失却还留在 AI 池」（列表可读 vs 读不到）
 - 改动：现象是**会话明明已经从客户端会话列表消失，却一直留在 AI 自助池、不归档**。根因有两层：①上一轮我按"顶栏是当前会话的权威来源"给 `toArchive` 加了 `key !== currentKey` 的保护——**恰恰漏掉了真实场景**：客户会话倒计时结束后会从列表消失（容器里只剩"暂无会话中用户"），但界面仍停在那条会话上、顶栏还显示着它，于是"当前会话"永远被豁免，等不到归档。②`active_conversation_keys` 在"容器不存在"和"容器存在但为空"两种情况下都返回 `[]`，而后端需要区分这两件事：前者是**读不到**（不能归档，否则一次解析失败会清空所有会话），后者是**列表真的是空的**（该归档）。改法：节点新增上报 `conversationListReadable`（容器 `chantListScrollArea` 是否存在）与 `feige_extract.conversation_list_readable()`；后端据此判定——**列表可读 → 不在列表里的全部归档（含顶栏还停着的那个）**；列表读不到（或老节点不带该字段）→ 退回旧行为，只保留当前会话。同时把 `toRestore` 改成"只恢复没有被归档判定命中的当前会话"，避免同一次快照里先恢复又立刻归档。
 - 位置：`Rag/tools/feige-uia-probe/{feige_extract.py,bridge_node.py}`、`Rag/rag-server/src/modules/desktop-bridge/accountSnapshotService.js`（+测试）。
@@ -345,3 +387,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\ops\Get-PlatformStatus.ps1
 - 位置：`SYSTEMS.md`、`REFACTOR_BASELINE_2026-09-23.md`。
 - 验证：网关、后端和前端基线测试已建立；真实平台与专用环境集成测试仍单独执行。
 - 待办：按 `SYSTEMS.md` 的顺序逐系统测试和重构。
+
+### 2026-10-13 — 拼多多客服聊天打通（视觉读取→平台入库，端到端实测）
+- 改动：①`pdd_reader.py` 适配客服工作台布局（左侧按状态分组：待回复/已超时/夜间待成交/已被自动回复/已回复；分组容错匹配；面板 3x 裁剪放大 OCR 提升小字识别）；②`bridge_node.py` 新增拼多多读取线程（PDD_READER_ENABLED/PDD_READER_INTERVAL_SECONDS），产出走既有 WS `message.inbound`（字段：platformCustomerId=会话键、direction in/out、指纹 channelMessageId）；③服务端注册 `pinduoduo → pinduoduo.workbench` 适配器；④新增 `scripts/create-desktop-bridge-account.js`（渠道通用建号脚本，账号 id=5 已建 + 绑定）。
+- **重要运维发现**：本机有两份项目副本——`E:\平台建设\guyong-platform`（开发仓库，平时在跑）与 `E:\BaiduNetdiskDownload\孤勇者_客服平台\project`（旧快照，今天 13:55 被启动占用全部端口）。已停掉旧副本服务、用仓库版重新启动平台（3001/3003/8787 均为仓库进程）。
+- **关键踩坑**：①`message.inbound` 的 `clientTimestamp` 为空时传了 `null` → 协议 `optional` 不允许 null → INVALID_ENVELOPE → 网关直接断开连接（表现为"上报后连接必断、消息不落库"）；改为缺省省略字段。②读取器误点左侧图标导航会把客户端切走模块（实测切到推广/应用中心）——已加保护：识别不到客服分组面板时**不做任何点击**，点击范围限制在会话项区域（0.045~0.23W）。③WinRT `GetFileFromPathAsync` 不接受相对路径（报"Wait 时发生异常"，易误判为 OCR 故障），`ocr_image` 已统一转绝对路径。
+- 验证：**端到端实测通过**——真实客户会话"超***"（消息：转人工 / 你好,在吗老板? / 我方回复 你好 / 在呢）被读取并上报；DB 出现 pinduoduo 会话（账号 5，ai_serving）与 5 条 plat_messages（inbound/outbound 正确）；节点日志确认 `node.ready 下发 2 个账号（含 pinduoduo.workbench）` 即渠道连接成功。
+- 待办：①**消息解析精修**（会话名取了 OCR 提示文字"添加备注信息"而非客户名"超***"——星号掩码名 OCR 难；横幅/底部提示/系统提示混入消息——需按气泡区域细化过滤）；②读取线程偶发 `OverflowError: int too long to convert`（捕获后继续，未定位）；③**C 盘仅剩 3.1GB（99%）**需清理；④回复发送（平台→客户端）未接；⑤AI 池中该会话的机器人回复链路未验证。

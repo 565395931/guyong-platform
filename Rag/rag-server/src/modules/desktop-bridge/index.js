@@ -14,6 +14,7 @@ function initDesktopBridge({ httpServer, sequelize, eventEmitter, options = {} }
     inboundService: options.inboundService,
     commandStatusService: options.commandStatusService,
     accountSnapshotService: options.accountSnapshotService,
+    orderIngestService: options.orderIngestService,
     registry: options.registry,
     configurationProvider: options.configurationProvider,
     environment: options.environment,

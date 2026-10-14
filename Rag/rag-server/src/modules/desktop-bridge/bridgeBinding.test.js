@@ -168,3 +168,15 @@ test('建号路由确实接入了桌面桥接分支（源码断言）', () => {
   assert.match(source, /sequelize\.transaction/)
   assert.match(source, /router\.post\('\/detect-desktop'/)
 })
+
+test('检测路由按渠道选择探针（源码断言）', () => {
+  const source = fs.readFileSync(require.resolve('../../routes/channelAccounts'), 'utf8')
+  // 每渠道一个探针：douyin → feige，xiaohongshu → qianfan
+  assert.match(source, /DESKTOP_PROBE_CONFIGS/)
+  assert.match(source, /feige-uia-probe/)
+  assert.match(source, /qianfan-uia-probe/)
+  assert.match(source, /QIANFAN_PROBE_PATH/)
+  assert.match(source, /probeConfig\.pythonEnv/)
+  // 建号时把渠道透传给 prepare，由其决定 adapterId
+  assert.match(source, /prepareDesktopBridgeAccountCreation\(\{ config, channel: channelCode \}\)/)
+})

@@ -1,0 +1,149 @@
+{
+  "$comment": "千帆客服工作台（小红书商家客服客户端）UIA 采点配置。status=verified 的条目由 2026-10-13 只读捕捉实测确认；unverified 表示尚未实测。",
+  "adapter_id": "xiaohongshu.qianfan",
+  "platform": "xiaohongshu",
+  "client_process_hints": ["千帆客服工作台.exe"],
+  "client_codename": "eva",
+  "client_version": "V1.2.6",
+  "window_class": "Chrome_WidgetWin_1",
+  "uia_stack": "Electron/Chromium",
+
+  "attach_target": {
+    "$comment": "★ 与飞鸽同一结论：附加顶层窗口只能得到空壳，必须附加子窗口 Chrome_RenderWidgetHostHWND。主窗口下有两个渲染宿主：主内容区（高约 752）与标题栏条（高 48），取节点数最多的那个。",
+    "step_1_find_main_window": "EnumWindows 找千帆进程（千帆客服工作台.exe）中 class=Chrome_WidgetWin_1 且 visible=1 的窗口（标题是 'eva'，无信息量，不能用标题定位）",
+    "step_2_find_render_host": "EnumChildWindows(main) 找全部 class=Chrome_RenderWidgetHostHWND 的子窗口，各附加一次取节点数最大者",
+    "step_3_attach": "uiautomation.ControlFromHandle(render_host_hwnd)",
+    "observed": {
+      "main_hwnd": 263750,
+      "main_rect": "1366x800@245,264",
+      "render_host_main_content": {
+        "hwnd": 656814,
+        "rect": "1366x752@245,312",
+        "nodes_texts_by_view": {
+          "$comment": "渲染宿主 HWND 固定，切换左侧导航时整棵内容树被替换；DocumentControl 名即视图标识。",
+          "客服工作台": { "document_name": "孤勇者玻璃隔热涂层-工作台", "nodes": 97, "texts": 29 },
+          "智能客服": { "document_name": "智能客服-机器人首页", "nodes": 307, "texts": 96 }
+        }
+      },
+      "render_host_title_bar": {
+        "hwnd": 525832,
+        "name": "",
+        "rect": "1366x48@245,264",
+        "texts": 2,
+        "$comment": "48px 标题栏条，只含店铺名 '孤勇者玻璃隔热涂层的店' 与一个图标，不是主内容"
+      },
+      "top_level_attach": { "nodes": 29, "texts": 4, "$comment": "从顶层 Chrome_WidgetWin_1 附加只有空壳，实测仅店铺名一条有信息" }
+    },
+    "anti_pattern": "不要用 GetRootControl().GetChildren() 遍历找窗口，会对上百个无关窗口逐个读属性并长时间阻塞。"
+  },
+
+  "visibility_requirements": {
+    "$comment": "实测：捕捉时千帆在后台（前台窗口是 ZCode），读取正常，不要求前台焦点。最小化/隐藏时是否可读未单独实测（与飞鸽同一 Electron 结构，推断相同）。",
+    "requires_foreground": false,
+    "requires_not_minimized": "assumed",
+    "requires_not_hidden": "assumed",
+    "hidden_window_evidence": "隐藏窗口 'eva'(1015x649) 的渲染宿主实测只读到 1 节点 / 0 文本；'加载中'、'消息预览'、'screenshots' 均隐藏。"
+  },
+
+  "stability": {
+    "$comment": "两轮连续读取（间隔 2s）文本完全一致：29/29。冷启动预热问题（飞鸽实测 Chromium 首次启用无障碍树需约 15s）未在千帆复测。",
+    "two_round_identical": true,
+    "cold_start_preheat": "unverified"
+  },
+
+  "surfaces": [
+    {
+      "name": "main",
+      "status": "verified",
+      "title": "eva（无信息量，需按进程定位）",
+      "role": "千帆客服工作台主窗口（左侧导航 + 会话列表 + 消息区）",
+      "observed_geometry": "1366x800",
+      "containers": {
+        "app": "根容器（左侧导航 + 主区域）",
+        "farmer-contact-list": "会话列表容器（左列），当前为空（暂无对话）",
+        "d-portal": "React portal 容器（空）",
+        "sandbox-body": "沙箱容器（off-screen）",
+        "npsWrap": "NPS 问卷容器（off-screen）",
+        "other-box": "辅助容器（off-screen）",
+        "menu-bottom-side-other": "左下角版本号菜单项（V1.2.6）",
+        "walle-eva-help-float-trigger": "右下浮动帮助按钮（walle = 小红书设计系统）"
+      },
+      "layout_columns": {
+        "left_nav": "53px 宽图标导航：客服 / 智能客服 / 数据 / 管理 / 订单",
+        "conversation_column": "322px：搜索框 + 「当前会话 / 全部会话」Tab + farmer-contact-list",
+        "message_column": "475px：顶部统计（提前接入/排队量/今日接待/3分钟回复率/客服好评率）+ 消息区（当前显示'暂无对话'）",
+        "right_column": "471px：当前为空（推断为客户资料面板，unverified）"
+      },
+      "toolbar_texts_verified": ["客服", "智能客服", "数据", "管理", "订单", "在线", "智能客服-全天候接待", "V1.2.6", "当前会话", "全部会话", "排队量", "今日接待", "3分钟回复率", "客服好评率", "提前接入", "暂无对话"],
+      "view_switching": {
+        "$comment": "切换左侧导航时渲染宿主 HWND 不变、内容树整体替换；capture 会自动跟随，产物按视图名另存副本。",
+        "views_observed": ["客服工作台", "智能客服-机器人首页"]
+      }
+    },
+    {
+      "name": "smart-service-view",
+      "status": "verified",
+      "role": "智能客服视图（左侧导航第 2 项），DocumentControl 名 '智能客服-机器人首页'",
+      "observed_geometry": "同主内容区（1366x752）",
+      "sub_tabs": ["机器人首页", "接待设置", "自动化工具", "商品知识", "店铺知识", "物流售后回复"],
+      "verified_fields": {
+        "robot_status": "智能机器人 / 接待中",
+        "接待数据": "统计周期（2026年09月12日-2026年10月11日）、近30天机器人接待会话量 30、近30天机器人辅助接待会话量 8",
+        "接待模式": "全天候接待 / 分时段接待；忙时接待·夜间接待·离线接待 = 未开启",
+        "转人工设置": "消费者发消息即分配给人工（未设值）；命中关键词转人工回复（未设值）；无答案/重复答案转人工回复 默认启用；消费者有负面情绪转人工回复 默认启用",
+        "回复场景设置": "聊天互动 / 店铺咨询活动 / 购买操作 / 商品咨询 / 物流咨询 / 售前问题 / 售后问题 分组，含 取消 / 确定 按钮"
+      },
+      "observed_transient": "一次捕捉到 '场景配置加载失败' + '重新加载' 按钮（短暂错误态）"
+    },
+    {
+      "name": "secondary-eva",
+      "status": "unverified",
+      "observed": { "hwnd": 853414, "title": "eva", "rect": "1015x649@772,371", "visible": false, "render_host_nodes": 1, "render_host_texts": 0 },
+      "role": "疑似独立的聊天/详情窗口，隐藏时不可读"
+    },
+    {
+      "name": "message-preview",
+      "status": "unverified",
+      "observed": { "hwnd": 329212, "title": "消息预览", "rect": "316x300@2244,1092", "visible": false },
+      "role": "消息预览浮窗（对应飞鸽「商家消息窗口」），当前隐藏，未读到渲染宿主"
+    },
+    {
+      "name": "screenshots",
+      "status": "unverified",
+      "observed": { "hwnd": 329290, "title": "screenshots", "rect": "2560x1392@0,0", "visible": false },
+      "role": "客户端内置截图工具窗口，隐藏，与业务无关"
+    },
+    {
+      "name": "loading",
+      "status": "unverified",
+      "observed": { "hwnd": 329254, "title": "加载中", "rect": "1015x649@772,371", "visible": false },
+      "role": "加载中过渡窗口，隐藏"
+    }
+  ],
+
+  "verified_fields": {
+    "shop_name_in_workbench": "孤勇者玻璃隔热涂层（主内容区页头）",
+    "shop_name_in_title_bar": "孤勇者玻璃隔热涂层的店（48px 标题栏渲染宿主）",
+    "agent_status": "在线（MenuItemControl）",
+    "service_mode": "智能客服-全天候接待",
+    "client_version": "V1.2.6",
+    "stats": ["提前接入", "排队量", "今日接待", "3分钟回复率", "客服好评率"],
+    "empty_state": "暂无对话（无会话时消息区文案）",
+    "search_placeholder": "用户ID/订单号/用户昵称/关键词"
+  },
+
+  "unverified_fields": {
+    "conversation_list_items": "会话列表项字段（昵称/未读/摘要）——当前无会话，待有真实会话时捕捉",
+    "message_area": "消息区消息（发送者/时间/正文/已读）——当前无会话",
+    "unread_badge": "未读徽标",
+    "recipient_identity": "客户身份标识（用户ID/昵称）",
+    "input_box": "输入框（只读流程不触碰，发送流程需要时另行识别）",
+    "right_column": "右侧栏内容（推断客户资料面板）"
+  },
+
+  "next_steps_to_verify": [
+    "有真实会话时重跑 `python qianfan_capture.py capture`，确认 farmer-contact-list 下的会话项结构与消息区字段",
+    "确认冷启动预热行为（冷启动后立即读 vs 15s 后读的节点数差异）",
+    "确认最小化/隐藏时不可读（与飞鸽一致性验证）"
+  ]
+}

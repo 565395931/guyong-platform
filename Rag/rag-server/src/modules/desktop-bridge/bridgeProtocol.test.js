@@ -15,6 +15,12 @@ const eventPayloads = {
   'node.heartbeat': { leases: [] },
   'account.snapshot': { accounts: [] },
   'account.state.changed': { accountId: 7, state: 'online' },
+  'commerce.orders.scraped': {
+    adapterId: 'xiaohongshu.qianfan',
+    source: 'qianfan_orders',
+    capturedAt: '2026-10-13T10:44:00+08:00',
+    orders: [{ 订单号: 'P806378637922055401', 状态: '已签收' }]
+  },
   'message.inbound': {
     accountId: 7,
     channel: 'taobao',
@@ -31,7 +37,7 @@ const eventPayloads = {
 test('accepts every supported protocol envelope type', () => {
   assert.deepEqual(TYPES, [
     'node.hello', 'node.ready', 'node.heartbeat',
-    'account.snapshot', 'account.state.changed',
+    'account.snapshot', 'account.state.changed', 'commerce.orders.scraped',
     'message.inbound', 'message.send', 'message.command.status',
     'event.ack', 'server.error'
   ])

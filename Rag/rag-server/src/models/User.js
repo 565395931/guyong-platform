@@ -26,9 +26,9 @@ const User = sequelize.define('User', {
     comment: '邮箱'
   },
   role: {
-    type: DataTypes.ENUM('user', 'agent', 'supervisor', 'admin'),
-    defaultValue: 'user',
-    comment: '角色（user/agent/supervisor/admin）'
+    type: DataTypes.ENUM('agent', 'admin'),
+    defaultValue: 'agent',
+    comment: '角色（user/agent/admin）'
   },
   status: {
     type: DataTypes.STRING(10),

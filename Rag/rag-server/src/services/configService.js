@@ -15,10 +15,9 @@ const path = require('path')
 const { sequelize } = require('../config/database')
 const redis = require('../config/redis')
 const {
-  REVIEW_DEFAULTS,
   getPublicAiConfigKeys,
   validatePublicAiConfig
-} = require('../modules/message-review/reviewConfig')
+} = require('./aiConfigValidation')
 
 const CACHE_PREFIX = 'config:'
 const CACHE_TTL = 3600 // 1 小时
@@ -37,6 +36,8 @@ try {
 
 // ========== 配置默认值（代码层 fallback，数据库和缓存都没有时用） ==========
 const DEFAULTS = {
+  handoff_notice_enabled: true,
+  handoff_notice_text: '正在为您转接技术同事，请您耐心等待。',
   ai_self_pool_enabled: true,
   ai_max_rounds: 0,
   ai_no_reply_timeout_enabled: true,
@@ -83,8 +84,6 @@ const DEFAULTS = {
   // AI 推荐回答并发限制（同时进行的 LLM 调用数）
   ai_suggest_concurrency: 3,
   // AI 自助回复回答有效性校验
-  ai_reply_validation_enabled: true,
-  ai_reply_validation_model: 'deepseek-v4-flash',
   // AI 推荐回答系统提示词（从 prompts/ai_suggest_system_prompt.md 文件加载）
   ai_suggest_system_prompt: aiPromptFromFile,
   // 连续消息合并/串行锁参数（可通过管理后台 Settings 动态调整）
@@ -95,7 +94,6 @@ const DEFAULTS = {
   // 语言兜底检查（全局开关，默认开启。所有发给客户的文本消息都会检查语言是否匹配）
   language_guard_enabled: true,
   ai_reply_lock_wait_ms: 12000,
-  ...REVIEW_DEFAULTS
 }
 
 // ========== 内部缓存（进程内，避免同一配置项在同一进程内频繁查 Redis） ==========

@@ -26,14 +26,13 @@ const { POOL_TYPE, CONV_STATUS } = require('../modules/conversation-pool/constan
 const { INTERNAL_EVENTS } = require('../modules/websocket/events')
 const { randomUUID } = require('node:crypto')
 const systemLogger = require('../utils/systemLogger')
-const { createPendingReviewGuard } = require('./aiReplyReviewGuard')
+const { isAiReplyEligible } = require('../modules/conversation-pool/aiReplyPolicy')
 
 const AI_REPLY_LOCK_POLL_MS = parseInt(process.env.AI_REPLY_LOCK_POLL_MS || '300', 10)
 
 // 延迟加载 aiAutoReplyService 和 poolService，避免循环依赖
 let aiAutoReplyService = null
 let poolService = null
-let pendingReviewGuard = null
 let eventEmitterRef = null
 
 function getAiAutoReplyService() {
@@ -48,16 +47,6 @@ function getPoolService() {
     poolService = require('../modules/conversation-pool/pool.service')
   }
   return poolService
-}
-
-function getPendingReviewGuard() {
-  if (!pendingReviewGuard) {
-    pendingReviewGuard = createPendingReviewGuard({
-      reviewService: require('../modules/message-review').reviewService,
-      logger: systemLogger
-    })
-  }
-  return pendingReviewGuard
 }
 
 function emitAiReplyStatus({ conversationId, status, jobId, jobMarker, reason }) {
@@ -77,6 +66,7 @@ function emitAiReplyStatus({ conversationId, status, jobId, jobMarker, reason })
  */
 function initAiReplyWorker(eventEmitter) {
   eventEmitterRef = eventEmitter
+  const stopDeliveryRecovery = require('../modules/conversation-pool/aiDeliveryFallback').startRecovery(eventEmitter)
 
   const worker = new Worker(
     QUEUE_NAMES.AI_REPLY,
@@ -87,7 +77,7 @@ function initAiReplyWorker(eventEmitter) {
 
       // 任务开始前校验：如果会话已离开 AI 自助池，说明这是连续消息或池流转后的残留任务，直接跳过。
       // 同时校验任务入队后是否已有更新的客户消息；连续消息只回复最新一条。
-      const stateBefore = await getConversationAiState(conversationId, enqueuedAt, jobMarker)
+      const stateBefore = await getConversationAiState(conversationId, enqueuedAt, jobMarker, job.data.aiEpoch ?? 0)
       if (!stateBefore.canAiReply) {
         const reason = stateBefore.reason || '会话已不在AI自助池，跳过残留AI回复任务'
         console.log(`[AiReplyWorker] 跳过任务 #${job.id}: ${reason}`)
@@ -100,25 +90,6 @@ function initAiReplyWorker(eventEmitter) {
         })
         emitAiReplyStatus({ conversationId, status: 'skipped', jobId: job.id, jobMarker, reason })
         return { replied: false, transferredToHuman: false, skipped: true, reason }
-      }
-
-      const reviewSkip = await getPendingReviewGuard()(message, conversationId)
-      if (reviewSkip) {
-        await logAiReplyEvent({
-          conversationId,
-          jobId: job.id,
-          status: 'skipped',
-          reason: reviewSkip.reason,
-          retryCount: job.attemptsMade
-        })
-        emitAiReplyStatus({
-          conversationId,
-          status: 'skipped',
-          jobId: job.id,
-          jobMarker,
-          reason: reviewSkip.reason
-        })
-        return { replied: false, transferredToHuman: false, ...reviewSkip }
       }
 
       const lockResult = await acquireConversationLock({ conversationId, jobId: job.id, enqueuedAt, jobMarker })
@@ -159,7 +130,7 @@ function initAiReplyWorker(eventEmitter) {
           conversationId,
           message,
           eventEmitterRef,
-          { enqueuedAt, jobMarker }
+          { enqueuedAt, jobMarker, aiEpoch: job.data.aiEpoch ?? 0 }
         )
       } finally {
         stopConversationLockHeartbeat(lockHeartbeat)
@@ -229,12 +200,14 @@ function initAiReplyWorker(eventEmitter) {
 
       console.log(`[AiReplyWorker] 任务 #${job.id} 重试耗尽(${job.attemptsMade}/${retryLimit})，自动转人工`)
 
+      const failureState = await getConversationAiState(conversationId, job.data.enqueuedAt, job.data.jobMarker, job.data.aiEpoch ?? 0)
+      if (!failureState.canAiReply) return
       // 转待人工池
       const poolSvc = getPoolService()
       await poolSvc.aiTransferToHuman(
         conversationId,
         `AI回复重试${retryLimit}次仍失败: ${err.message}`,
-        eventEmitterRef
+        eventEmitterRef, null, {expectedEpoch:job.data.aiEpoch ?? 0}
       )
 
       // 写入业务日志
@@ -257,6 +230,7 @@ function initAiReplyWorker(eventEmitter) {
 
   console.log('[AiReplyWorker] Worker 已启动，并发数: 5')
 
+  worker.once('closed',stopDeliveryRecovery)
   return worker
 }
 
@@ -309,10 +283,10 @@ function shouldSuppressAiReplyLog({ status, reason }) {
   ].some(pattern => text.includes(pattern))
 }
 
-async function getConversationAiState(conversationId, enqueuedAt = null, jobMarker = null) {
+async function getConversationAiState(conversationId, enqueuedAt = null, jobMarker = null, expectedEpoch = null) {
   try {
     const [rows] = await sequelize.query(
-      `SELECT pool_type, conv_status FROM conversations WHERE id = :conversationId LIMIT 1`,
+      `SELECT pool_type, conv_status, conversations.status, conversations.ai_epoch, conversations.claimed_by, a.adapter_type FROM conversations LEFT JOIN channel_accounts a ON a.id = conversations.account_id WHERE conversations.id = :conversationId LIMIT 1`,
       { replacements: { conversationId } }
     )
 
@@ -326,7 +300,8 @@ async function getConversationAiState(conversationId, enqueuedAt = null, jobMark
     }
 
     const conv = rows[0]
-    if (conv.pool_type !== POOL_TYPE.AI_SELF || conv.conv_status !== CONV_STATUS.AI_SERVING) {
+    if (expectedEpoch != null && Number(conv.ai_epoch || 0) !== Number(expectedEpoch)) return {canAiReply:false,reason:'AI任务已作废'}
+    if (!isAiReplyEligible(conv)) {
       return {
         canAiReply: false,
         reason: `会话当前为 ${conv.pool_type}/${conv.conv_status}，不是 ${POOL_TYPE.AI_SELF}/${CONV_STATUS.AI_SERVING}`

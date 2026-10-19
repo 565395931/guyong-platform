@@ -2,7 +2,7 @@ const jwt = require('jsonwebtoken')
 const User = require('../models/User')
 const { resolveJwtConfig } = require('../config/jwt')
 
-const ALLOWED_ROLES = new Set(['agent', 'supervisor', 'admin'])
+const ALLOWED_ROLES = new Set(['agent', 'admin'])
 
 function normalizeRole(role) {
   return role === 'user' ? 'agent' : role

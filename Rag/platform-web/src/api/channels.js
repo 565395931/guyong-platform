@@ -29,8 +29,12 @@ export function detectDesktopAccount() {
   return request.post('/v1/channel-accounts/detect-desktop', {}, { timeout: 60000 })
 }
 
-export function deleteChannelAccount(id) {
-  return request.delete(`/v1/channel-accounts/${id}`)
+export function deleteChannelAccount(id, data) {
+  return request.delete(`/v1/channel-accounts/${id}`, { data, timeout: 60000 })
+}
+
+export function previewChannelAccountDeletion(id) {
+  return request.get(`/v1/channel-accounts/${id}/deletion-preview`)
 }
 
 export function getChannelEvents(params) {

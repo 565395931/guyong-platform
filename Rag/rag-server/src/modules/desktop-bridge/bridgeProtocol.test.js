@@ -16,6 +16,7 @@ const eventPayloads = {
   'account.snapshot': { accounts: [] },
   'account.state.changed': { accountId: 7, state: 'online' },
   'commerce.orders.scraped': {
+    accountId: 7,
     adapterId: 'xiaohongshu.qianfan',
     source: 'qianfan_orders',
     capturedAt: '2026-10-13T10:44:00+08:00',

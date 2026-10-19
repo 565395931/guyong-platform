@@ -82,7 +82,7 @@ const mappingPanel = ref(null)
 const warehouseForm = reactive({ code: '', name: '' })
 const adjustForm = reactive({ skuCode: '', quantity: '', idempotencyKey: '' })
 const reservationForm = reactive({ orderRef: '', reservationKey: '', skuCode: '', quantity: '' })
-const canManage = computed(() => { try { return ['admin', 'supervisor'].includes(JSON.parse(localStorage.getItem('platform_user') || '{}')?.role) } catch { return false } })
+const canManage = computed(() => { try { return ['admin'].includes(JSON.parse(localStorage.getItem('platform_user') || '{}')?.role) } catch { return false } })
 
 async function loadInventory() {
   if (!selectedCode.value) { inventory.value = []; return }

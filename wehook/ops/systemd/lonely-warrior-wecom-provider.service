@@ -1,0 +1,21 @@
+[Unit]
+Description=Lonely Warrior WeCom provider callback service
+After=network.target
+
+[Service]
+Type=simple
+User=lwwecom
+Group=lwwecom
+WorkingDirectory=/opt/lonely-warrior-wecom-provider
+EnvironmentFile=/etc/lonely-warrior-wecom-provider/provider.env
+ExecStart=/usr/bin/node src/wecom/providerCallbackServer.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lonely-warrior-wecom-provider
+
+[Install]
+WantedBy=multi-user.target

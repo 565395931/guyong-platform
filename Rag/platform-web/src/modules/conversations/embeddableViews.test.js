@@ -19,7 +19,7 @@ test('conversation list sends account scope to the backend and reloads when it c
   const source = readSource('../../components/Conversation/ConversationList.vue')
 
   assert.match(source, /accountId:\s*\{\s*type:\s*\[String, Number\],\s*default:\s*''\s*\}/)
-  assert.match(source, /<el-option label="微信小程序" value="wechat" \/>/)
+  assert.doesNotMatch(source, /placeholder="渠道筛选"/)
   assert.match(source, /params\.account_id\s*=\s*props\.accountId/)
   assert.match(source, /props\.fixedChannel,\s*props\.accountId/)
 })

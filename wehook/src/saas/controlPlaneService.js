@@ -1,6 +1,7 @@
 const crypto = require('crypto')
 const { hashPassword, verifyPassword, hashToken, createOpaqueToken } = require('./security')
 const { creditBalance } = require('./tokenLedger')
+const { balance: moneyBalance } = require('./modelBilling')
 
 function slugify(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '').slice(0, 48)
@@ -13,11 +14,11 @@ class ControlPlaneService {
     this.now = now
   }
 
-  bootstrap({ adminUsername, adminPassword }) {
+  bootstrap({ adminUsername, adminPassword, adminMustChangePassword = true }) {
     return this.store.transaction(data => {
       if (!data.plans.length) data.plans.push({ id: 'starter', name: '启航套餐', monthlyCredits: 100000, status: 'active', createdAt: this.now() })
       if (!data.users.some(item => item.role === 'operator')) {
-        data.users.push({ id: crypto.randomUUID(), username: adminUsername, passwordHash: hashPassword(adminPassword, undefined, 8), role: 'operator', tenantId: null, status: 'active', mustChangePassword: true, createdAt: this.now() })
+        data.users.push({ id: crypto.randomUUID(), username: adminUsername, passwordHash: hashPassword(adminPassword, undefined, 8), role: 'operator', tenantId: null, status: 'active', mustChangePassword: Boolean(adminMustChangePassword), createdAt: this.now() })
       }
     })
   }
@@ -66,16 +67,17 @@ class ControlPlaneService {
       if (!data.tenants.some(item => item.id === tenantId)) throw Object.assign(new Error('tenant not found'), { code: 'tenant_not_found' })
       if (!/^ww[a-zA-Z0-9_-]{3,}$/.test(String(corpId || ''))) throw Object.assign(new Error('invalid corpId'), { code: 'invalid_corp_id' })
       const existing = data.wecomInstallations.find(item => item.corpId === corpId)
-      if (existing && existing.tenantId !== tenantId) throw Object.assign(new Error('corpId belongs to another tenant'), { code: 'corp_id_conflict' })
+      if (existing && existing.tenantId && existing.tenantId !== tenantId) throw Object.assign(new Error('corpId belongs to another tenant'), { code: 'corp_id_conflict' })
       const createdAt = this.now()
       const installation = existing || { id: crypto.randomUUID(), tenantId, corpId, createdAt }
+      installation.tenantId = tenantId
       installation.companyName = String(companyName || '').trim().slice(0, 100)
       installation.callbackKey = String(callbackKey || crypto.randomBytes(12).toString('base64url')).slice(0, 64)
-      installation.status = 'pending_callback'
+      installation.status = installation.permanentCodeEncrypted ? 'authorized' : 'pending_callback'
       installation.updatedAt = createdAt
       if (!existing) data.wecomInstallations.push(installation)
       data.auditEntries.push({ id: crypto.randomUUID(), actorId, action: existing ? 'wecom.update' : 'wecom.register', targetType: 'wecom_installation', targetId: installation.id, metadata: { tenantId, corpId }, createdAt })
-      return installation
+      return this.publicInstallation(installation)
     })
   }
 
@@ -91,6 +93,22 @@ class ControlPlaneService {
     })
   }
 
+  issueModelKey({ tenantId, name, actorId }) {
+    return this.store.transaction(data => {
+      if (!data.tenants.some(t => t.id === tenantId && t.status === 'active')) throw Object.assign(new Error('客户不存在或已停用'), { code: 'tenant_not_found' })
+      const key = createOpaqueToken('sk_lw')
+      const row = { id: crypto.randomUUID(), tenantId, name: String(name || '本地模型服务').trim().slice(0, 80), tokenHash: hashToken(key), tokenPreview: key.slice(0, 9) + '…' + key.slice(-4), status: 'active', createdAt: this.now() }
+      data.modelKeys.push(row)
+      data.auditEntries.push({ id: crypto.randomUUID(), actorId, action: 'model_key.issue', targetId: row.id, metadata: { tenantId, name: row.name }, createdAt: row.createdAt })
+      return { key, credential: this.publicDevice(row), baseUrl: 'https://provider.thelonelybrave.cn/v1', model: 'customer-auto' }
+    })
+  }
+  async authenticateModelKey(token) {
+    const d = await this.store.snapshot(), digest = hashToken(token)
+    const row = d.modelKeys.find(k => k.tokenHash === digest && k.status === 'active')
+    if (!row || !d.tenants.some(t => t.id === row.tenantId && t.status === 'active')) return null
+    return { id: row.id, tenantId: row.tenantId, name: row.name }
+  }
   async authenticateDevice(token) {
     const data = await this.store.snapshot()
     const digest = hashToken(token)
@@ -103,19 +121,24 @@ class ControlPlaneService {
     return safe
   }
 
+  publicInstallation(installation) {
+    const { permanentCodeEncrypted, ...safe } = installation
+    return safe
+  }
+
   async adminOverview() {
     const data = await this.store.snapshot()
-    const tenants = data.tenants.map(tenant => ({ ...tenant, balance: creditBalance(data, tenant.id), devices: data.devices.filter(item => item.tenantId === tenant.id).length, wecom: data.wecomInstallations.filter(item => item.tenantId === tenant.id).length }))
-    return { tenants, installations: data.wecomInstallations, ledger: data.creditEntries.slice().reverse().slice(0, 100), audit: data.auditEntries.slice().reverse().slice(0, 50), totals: { tenants: tenants.length, credits: tenants.reduce((sum, item) => sum + item.balance, 0), installations: data.wecomInstallations.length, devices: data.devices.length } }
+    const tenants = data.tenants.map(tenant => ({ ...tenant, balance: creditBalance(data, tenant.id), moneyBalance: moneyBalance(data, tenant.id), devices: data.devices.filter(item => item.tenantId === tenant.id).length, wecom: data.wecomInstallations.filter(item => item.tenantId === tenant.id).length }))
+    return { tenants, installations: data.wecomInstallations.map(item => this.publicInstallation(item)), ledger: data.creditEntries.slice().reverse().slice(0, 100), audit: data.auditEntries.slice().reverse().slice(0, 50), totals: { tenants: tenants.length, money: tenants.reduce((sum, item) => sum + item.moneyBalance, 0), credits: tenants.reduce((sum, item) => sum + item.balance, 0), installations: data.wecomInstallations.length, devices: data.devices.length } }
   }
 
   async accountOverview(tenantId) {
     const data = await this.store.snapshot()
     const tenant = data.tenants.find(item => item.id === tenantId)
     if (!tenant) throw Object.assign(new Error('tenant not found'), { code: 'tenant_not_found' })
-    const subscription = data.subscriptions.find(item => item.tenantId === tenantId)
+    const subscription = data.subscriptions.find(item => item.tenantId === tenantId && item.planId === 'token-100') || data.subscriptions.find(item => item.tenantId === tenantId)
     const plan = data.plans.find(item => item.id === subscription?.planId) || null
-    return { tenant, balance: creditBalance(data, tenantId), subscription, plan, devices: data.devices.filter(item => item.tenantId === tenantId).map(item => this.publicDevice(item)), installations: data.wecomInstallations.filter(item => item.tenantId === tenantId), ledger: data.creditEntries.filter(item => item.tenantId === tenantId).slice().reverse().slice(0, 50) }
+    return { tenant, balance: creditBalance(data, tenantId), subscription, plan, devices: data.devices.filter(item => item.tenantId === tenantId).map(item => this.publicDevice(item)), installations: data.wecomInstallations.filter(item => item.tenantId === tenantId).map(item => this.publicInstallation(item)), ledger: data.creditEntries.filter(item => item.tenantId === tenantId).slice().reverse().slice(0, 50) }
   }
 }
 

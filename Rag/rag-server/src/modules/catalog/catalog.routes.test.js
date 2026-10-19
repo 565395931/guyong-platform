@@ -10,7 +10,7 @@ const {
 test('agents can read but cannot mutate catalog data', () => {
   assert.equal(canReadCatalog({ role: 'agent' }), true)
   assert.equal(canManageCatalog({ role: 'agent' }), false)
-  assert.equal(canManageCatalog({ role: 'supervisor' }), true)
+  assert.equal(canManageCatalog({ role: 'supervisor' }), false)
   assert.equal(canManageCatalog({ role: 'admin' }), true)
 })
 

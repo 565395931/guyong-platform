@@ -9,7 +9,7 @@ const readSource = relativePath => readFileSync(new URL(relativePath, import.met
 test('quick reply panel loads replies from the API instead of hardcoded data', () => {
   const source = readSource('../../components/Panel/QuickReplyPanel.vue')
 
-  assert.match(source, /getQuickReplies\(\{ page: 1, pageSize: 100 \}\)/)
+  assert.match(source, /getQuickReplies\(\{ page, pageSize: 100 \}\)/)
   assert.doesNotMatch(source, /id:\s*111/)
   assert.doesNotMatch(source, /const treeData = ref\(\[/)
 })
@@ -22,10 +22,10 @@ test('quick reply panel exposes copy, edit, add and delete affordances', () => {
   assert.match(source, /window\.isSecureContext/)
   assert.match(source, /document\.execCommand\('copy'\)/)
   // 每条话术：编辑 + 删除
-  assert.match(source, /title="编辑"/)
+  assert.match(source, /title="编辑我的话术"/)
   // 每一层分组 / 分类：添加 + 删除
   assert.match(source, /v-if="data\.kind !== 'item'"/)
-  assert.match(source, /title="添加话术"/)
+  assert.match(source, /title="添加个人话术"/)
   // 删除分级：单条走 id，整层走收集子节点
   assert.match(source, /const collectReplies = \(node\) =>/)
 })
@@ -38,7 +38,7 @@ test('quick reply panel calls the CRUD endpoints and gates them by role', () => 
   assert.match(panel, /updateQuickReply\(form\.value\.id, payload\)/)
   assert.match(panel, /deleteQuickReply\(r\.id\)/)
   // 后端 requireManager 只放 admin / 主管，坐席点上去只会 403，所以按钮也不该给
-  assert.match(panel, /\['admin', 'supervisor'\]\.includes\(userStore\.userInfo\?\.role\)/)
+  assert.match(panel, /\['admin', 'agent'\]\.includes\(userStore\.userInfo\?\.role\)/)
 
   assert.match(api, /export function createQuickReply/)
   assert.match(api, /export function updateQuickReply/)

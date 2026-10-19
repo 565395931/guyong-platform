@@ -101,24 +101,30 @@ function createScrapedOrderIngestService({ sequelize, logger = console }) {
     throw new TypeError('scrapedOrderIngestService requires a sequelize instance')
   }
 
-  async function resolveAccountId(channel, adapterId, transaction) {
+  async function resolveAccountId(channel, adapterId, accountId, nodeId, trustedLocal, transaction) {
     const rows = await sequelize.query(
-      `SELECT id FROM channel_accounts
-        WHERE channel = :channel AND adapter_type = 'desktop_bridge'
-        ORDER BY id LIMIT 1`,
-      { replacements: { channel, adapterId }, transaction }
+      `SELECT a.id FROM channel_accounts a
+         JOIN desktop_bridge_bindings b ON b.channel_account_id = a.id
+         LEFT JOIN desktop_bridge_leases l ON l.channel_account_id = a.id
+        WHERE a.id = :accountId AND a.channel = :channel
+          AND a.adapter_type = 'desktop_bridge' AND a.status = 'active'
+          AND b.enabled = 1 AND b.adapter_id = :adapterId
+          AND (:trustedLocal = 1 OR ((b.preferred_node_id IS NULL OR b.preferred_node_id = :nodeId)
+               AND l.node_id = :nodeId AND l.expires_at > NOW(3)))
+        FOR UPDATE`,
+      { replacements: { channel, adapterId, accountId, nodeId: nodeId || null, trustedLocal: trustedLocal ? 1 : 0 }, transaction }
     )
     const first = Array.isArray(rows) && Array.isArray(rows[0]) ? rows[0][0] : null
     return first && first.id ? Number(first.id) : null
   }
 
-  async function orderNoExists(orderNo, transaction) {
+  async function findOrder(orderNo, transaction) {
     const rows = await sequelize.query(
-      'SELECT id FROM orders WHERE order_no = :orderNo LIMIT 1',
+      'SELECT id, channel, account_id FROM orders WHERE order_no = :orderNo LIMIT 1 FOR UPDATE',
       { replacements: { orderNo }, transaction }
     )
     const first = Array.isArray(rows) && Array.isArray(rows[0]) ? rows[0][0] : null
-    return Boolean(first && first.id)
+    return first || null
   }
 
   async function upsertOrder(record, accountId, channel, transaction) {
@@ -132,8 +138,6 @@ function createScrapedOrderIngestService({ sequelize, logger = console }) {
          :customerAddress, :status, :paymentStatus, :purchaseTime, :rawPayload,
          NOW(), NOW())
        ON DUPLICATE KEY UPDATE
-         channel = VALUES(channel),
-         account_id = VALUES(account_id),
          channel_user_id = VALUES(channel_user_id),
          customer_name = VALUES(customer_name),
          customer_phone = VALUES(customer_phone),
@@ -182,7 +186,7 @@ function createScrapedOrderIngestService({ sequelize, logger = console }) {
     )
   }
 
-  async function handle({ envelope }) {
+  async function handle({ envelope, nodeId, trustedLocal = false }) {
     const payload = envelope && envelope.payload ? envelope.payload : {}
     const adapterId = cleanString(payload.adapterId)
     const channel = ADAPTER_CHANNEL_MAP[adapterId]
@@ -192,6 +196,9 @@ function createScrapedOrderIngestService({ sequelize, logger = console }) {
         errorCode: 'UNSUPPORTED_ADAPTER',
         message: `不支持的上报适配器 ${adapterId || '(空)'}`
       }
+    }
+    if (!Number.isInteger(payload.accountId) || payload.accountId <= 0 || (!trustedLocal && !nodeId)) {
+      return { status: 'rejected', errorCode: 'ACCOUNT_CONTEXT_REQUIRED', message: 'Explicit account and authenticated node required' }
     }
     const orders = Array.isArray(payload.orders) ? payload.orders : []
     if (orders.length > MAX_ORDERS_PER_BATCH) {
@@ -206,9 +213,14 @@ function createScrapedOrderIngestService({ sequelize, logger = console }) {
     }
 
     const meta = { adapterId, capturedAt: cleanString(payload.capturedAt) || null }
-    const transaction = await sequelize.transaction()
+    let transaction
     try {
-      const accountId = await resolveAccountId(channel, adapterId, transaction)
+      transaction = await sequelize.transaction()
+      const accountId = await resolveAccountId(channel, adapterId, payload.accountId, nodeId, trustedLocal, transaction)
+      if (!accountId) {
+        await transaction.rollback()
+        return { status: 'rejected', errorCode: 'ACCOUNT_NOT_BOUND', message: 'Account is inactive or not bound to this node and adapter' }
+      }
       let inserted = 0
       let updated = 0
       let skipped = 0
@@ -220,7 +232,11 @@ function createScrapedOrderIngestService({ sequelize, logger = console }) {
           skipped += 1
           continue
         }
-        const existed = await orderNoExists(record.orderNo, transaction)
+        const existed = await findOrder(record.orderNo, transaction)
+        if (existed && (existed.channel !== channel || Number(existed.account_id) !== accountId)) {
+          await transaction.rollback()
+          return { status: 'rejected', errorCode: 'ORDER_OWNER_CONFLICT', message: 'Order number belongs to another account; batch rolled back' }
+        }
         await upsertOrder(record, accountId, channel, transaction)
         if (existed) {
           updated += 1
@@ -240,7 +256,7 @@ function createScrapedOrderIngestService({ sequelize, logger = console }) {
         message: `新增 ${inserted} 条、更新 ${updated} 条${skippedNote}`
       }
     } catch (error) {
-      await transaction.rollback()
+      if (transaction && !transaction.finished) await transaction.rollback()
       logger.error?.(`[OrderIngest] 入库失败: ${error.message}`)
       return {
         status: 'retryable_error',

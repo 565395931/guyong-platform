@@ -1,7 +1,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 
-const { getPublicAiConfigKeys, validatePublicAiConfig } = require('../message-review/reviewConfig')
+const { getPublicAiConfigKeys, validatePublicAiConfig } = require('../../services/aiConfigValidation')
 const { createBailianCredentialService } = require('./bailianCredentialService')
 
 // ========== 新增的可配置项 ==========

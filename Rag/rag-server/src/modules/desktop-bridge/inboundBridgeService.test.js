@@ -3,6 +3,21 @@ const assert = require('node:assert/strict')
 
 const { createInboundBridgeService } = require('./inboundBridgeService')
 
+test('头像和消息图片文件名按渠道账号隔离并消除路径穿越', () => {
+  const { bridgeMediaFilename } = require('./inboundBridgeService')
+  const identity = '../../other-file'
+  const first = bridgeMediaFilename('avatar', { channel: 'douyin', accountId: 1, identity })
+  assert.match(first, /^bridge-avatar-[a-f0-9]{64}\.png$/)
+  assert.notEqual(first, bridgeMediaFilename('avatar', { channel: 'douyin', accountId: 2, identity }))
+  assert.notEqual(first, bridgeMediaFilename('avatar', { channel: 'pinduoduo', accountId: 1, identity }))
+})
+
+test('桥接消息时间与消息主链路一致保存 UTC 并保持批次顺序', () => {
+  const { resolveMessageTime } = service(ACTIVE_BOUND)
+  assert.equal(resolveMessageTime({ clientTimestamp: '2026-10-19T16:00:00+08:00', rawData: { batchIndex: 7 } }), '2026-10-19 08:00:00.007')
+  assert.equal(resolveMessageTime({ clientTimestamp: 'invalid' }), null)
+})
+
 /** 假 sequelize：只回答 resolveAccount 的那条 JOIN 查询。 */
 function fakeSequelize(accountRow) {
   return {
@@ -19,8 +34,33 @@ const ACTIVE_BOUND = {
   account_name: '孤勇者科隔热材料',
   binding_enabled: 1,
   adapter_id: 'doudian.feige',
-  preferred_node_id: null
+  preferred_node_id: null,
+  lease_node_id: 2,
+  lease_expires_at: '2099-01-01T00:00:00Z'
 }
+
+test('无首选节点绑定也必须持有有效租约才能提交入站', async () => {
+  for (const row of [
+    { ...ACTIVE_BOUND, lease_node_id: 7 },
+    { ...ACTIVE_BOUND, lease_expires_at: '2000-01-01T00:00:00Z' }
+  ]) {
+    const result = await service(row).handle({ nodeId: 2, envelope: { payload: { accountId: 2, channel: 'douyin' } } })
+    assert.equal(result.errorCode, 'NO_ACTIVE_LEASE')
+  }
+})
+
+test('跨渠道伪造入站在消息持久化前被拒绝', async () => {
+  const result = await service(ACTIVE_BOUND).handle({ nodeId: 2, envelope: { payload: { accountId: 2, channel: 'pinduoduo' } } })
+  assert.equal(result.errorCode, 'CHANNEL_ACCOUNT_MISMATCH')
+})
+
+test('桌面同步不能把待人工会话改回 AI 池', async () => {
+  let statement = ''
+  const bridge = createInboundBridgeService({ sequelize: { query: async sql => { statement = sql; return [{ affectedRows: 0 }] } } })
+  assert.equal(await bridge.ensureAiPool('conversation-test'), false)
+  assert.match(statement, /pool_type = 'ai_self'[\s\S]*conv_status = 'pending_claim'/)
+  assert.match(statement, /claimed_by IS NULL/)
+})
 
 function service(accountRow) {
   // processIncomingMessage 不在这些用例里被触发（handle 用无效 payload 提前返回，

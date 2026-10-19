@@ -17,7 +17,7 @@ test('chat window disables the composer and blocks send for read-only conversati
 
   assert.match(source, /const transportReadOnly = computed/)
   assert.match(source, /props\.readOnlyChannels\.includes\(props\.conversation\?\.channel\)/)
-  assert.match(source, /:disabled="sending \|\| transportReadOnly"/)
+  assert.match(source, /:disabled="sending \|\| transportReadOnly \|\| isArchivedConversation\(conversation\)"/)
   assert.match(source, /if \(transportReadOnly\.value\) return/)
   assert.match(source, /需要在线桌面节点/)
 })

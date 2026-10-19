@@ -48,7 +48,7 @@ https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model
 - 首次使用前 PaddleX 会做下载源连通性检查；如需跳过，设置
   `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True`。
 
-### 模型存放位置（不占 C 盘）
+### 模型存放位置（随项目目录）
 
 模型缓存根目录由环境变量 `PADDLE_PDX_CACHE_HOME` 指定，**本项目已在
 `pdd_paddle.py` 中固定指向项目目录**（不再使用默认的 `C:\Users\<用户>\.paddlex`）：
@@ -66,13 +66,11 @@ Rag/tools/pinduoduo-uia-probe/paddlex_home/
 
 ### 两个必须知道的坑
 
-1. **中文路径坑（最重要）**：飞桨的 C++ 层在**非 ASCII 路径**下读模型会失败，报
-   `parse error ... empty input`（看起来像模型损坏，实际是路径问题）。本项目路径
-   `E:\平台建设\...` 含中文，因此代码会自动改走**英文目录联接（junction）**：
-   ```powershell
-   mklink /J E:\guyong-platform E:\平台建设\guyong-platform
-   ```
-   若换机器/换路径，请重建该 junction；没有 junction 时飞桨会退回 C 盘默认缓存（如果能读到）。
+1. **中文路径**：飞桨 C++ 层不能稳定读取非 ASCII 模型路径。代码现在为实际模型目录
+   自动创建唯一的 ASCII 目录联接，入口位于 `%TEMP%/guyong-ocr-links/<路径摘要>`，
+   模型实体仍在上面的项目目录。无需复用旧机器的 `E:\guyong-platform`。
+   支持通过 `PADDLE_PDX_CACHE_HOME` 指定其他 ASCII 缓存目录；如果临时目录也含中文，
+   需显式指定该变量。迁移或清理临时入口后，下次运行会重建联接。
 2. **MKLDNN 兼容坑**：PaddlePaddle 3.x 的 oneDNN 后端在部分 CPU 上报
    `ConvertPirAttribute2RuntimeAttribute not support`。`pdd_paddle.py` 已设置
    `FLAGS_use_mkldnn=0` 并传 `enable_mkldnn=False`。
@@ -99,7 +97,7 @@ python pdd_reader.py once --json out/read.json
 
 # 历史回翻（滚到顶 → 从上往下读 → 回到底部）
 python pdd_backfill.py --max-scrolls 30 --json out/history.json
-python pdd_backfill.py --ingest      # 另存入库 payload（与实时上报同指纹格式，入库自动去重）
+python pdd_backfill.py --ingest --account-id <实际账号ID>      # 另存入库 payload（与实时上报同指纹格式，入库自动去重）
 ```
 
 节点集成（`../feige-uia-probe/bridge_node.py`）：

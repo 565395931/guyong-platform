@@ -14,7 +14,7 @@ const crypto = require('crypto')
 const { sequelize } = require('../config/database')
 
 const JWT_SECRET = process.env.JWT_SECRET
-const EFFECTIVE_JWT_SECRET = JWT_SECRET || 'rag_secret_key_2024_dev_only'
+const EFFECTIVE_JWT_SECRET = JWT_SECRET
 const MEDIA_DIR = path.join(__dirname, '..', 'public', 'media-files')
 const PUBLIC_PREFIX = '/api/media-files/static'
 
@@ -89,7 +89,7 @@ router.use((req, res, next) => {
   try {
     const decoded = jwt.verify(token, EFFECTIVE_JWT_SECRET)
     req.user = decoded
-    if (!['admin', 'supervisor', 'agent'].includes(decoded.role)) {
+    if (!['admin', 'agent'].includes(decoded.role)) {
       return res.status(403).json({ success: false, message: '无权限访问媒体文件' })
     }
     next()
@@ -248,8 +248,8 @@ router.post('/upload', upload.fields([
 // ========== 更新文件信息 ==========
 router.put('/:id', async (req, res) => {
   try {
-    if (!['admin', 'supervisor'].includes(req.user.role)) {
-      return res.status(403).json({ success: false, message: '仅管理员或主管可编辑文件信息' })
+    if (!['admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: '仅管理员可编辑文件信息' })
     }
 
     const { displayName = '', description = '' } = req.body || {}
@@ -297,8 +297,8 @@ router.put('/:id', async (req, res) => {
 // ========== 删除文件 ==========
 router.delete('/:id', async (req, res) => {
   try {
-    if (!['admin', 'supervisor'].includes(req.user.role)) {
-      return res.status(403).json({ success: false, message: '仅管理员或主管可删除文件' })
+    if (!['admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: '仅管理员可删除文件' })
     }
 
     const [rows] = await sequelize.query(

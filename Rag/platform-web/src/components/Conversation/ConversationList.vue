@@ -27,27 +27,11 @@
     <!-- 待人工池提示条 -->
     <div v-if="!globalSearch && conversationStore.activePoolTab === 'pending_human'" class="pending-pool-notice">
       <el-icon size="14" color="#f56c6c"><BellFilled /></el-icon>
-      <span>待人工池为高优先级，请尽快抢单处理</span>
+      <span>{{ isAdminUser ? '待人工会话等待10秒后自动分配，也可立即指定客服' : '这里是分配给你的客户，接管或发送消息后进入人工接待' }}</span>
     </div>
 
     <!-- 工具栏 -->
     <div class="conversation-list__header">
-      <div class="conversation-list__toolbar">
-        <el-select
-          v-model="selectedChannels"
-          multiple
-          collapse-tags
-          placeholder="渠道筛选"
-          size="small"
-          style="flex: 1"
-          :disabled="globalSearch || channelScope.filterLocked"
-        >
-          <el-option label="WhatsApp" value="whatsapp" />
-          <el-option label="微信客服" value="wecom_kf" />
-          <el-option label="微信小程序" value="wechat" />
-          <el-option label="抖音" value="douyin" disabled />
-        </el-select>
-      </div>
       <div class="conversation-list__search-wrap">
         <el-input
           v-model="searchKeyword"
@@ -121,6 +105,7 @@
 </template>
 
 <script setup>
+import { fitsWorkspaceTab } from '@/modules/conversations/workspaceView'
 import { ref, computed, onMounted, onBeforeUnmount, watch, markRaw } from 'vue'
 import {
   Search, WarningFilled, BellFilled,
@@ -292,9 +277,7 @@ const filteredList = computed(() => {
   }
   const activeTab = conversationStore.activePoolTab
   return conversationStore.list.filter(conv => {
-    const poolMatch = activeTab === 'archived'
-      ? conv.conv_status === 'archived'
-      : conv.pool_type === activeTab
+    const poolMatch = fitsWorkspaceTab(conv, activeTab, userStore.userInfo || {})
     const channelMatch = selectedChannels.value.length === 0 || selectedChannels.value.includes(conv.channel)
     const searchMatch = !searchKeyword.value ||
       (conv.user_name && conv.user_name.includes(searchKeyword.value)) ||
@@ -327,6 +310,7 @@ const handleGlobalSearch = async (keyword) => {
     if (data && data.list) {
       const normalizedList = data.list.map(conv => ({
         id: conv.id,
+        is_mine: Boolean(conv.is_mine),
         channel: conv.channel,
         account_id: conv.account_id,
         account_name: conv.account_name || '',
@@ -454,6 +438,7 @@ const loadConversations = async () => {
     if (data && data.list) {
       const normalizedList = data.list.map(conv => ({
         id: conv.id,
+        is_mine: Boolean(conv.is_mine),
         channel: conv.channel,
         account_id: conv.account_id,
         account_name: conv.account_name || '',
@@ -777,11 +762,13 @@ watch(() => conversationStore.activePoolTab, (tab) => {
 
 // ========== 初始化 ==========
 onMounted(() => {
+  websocketService.on('bindings_changed', loadConversations)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   loadConversations()
 })
 
 onBeforeUnmount(() => {
+  websocketService.off('bindings_changed', loadConversations)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   searchRequestSeq++
   loadRequestSeq++

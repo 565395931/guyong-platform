@@ -10,7 +10,7 @@ const {
   parseChinaTime
 } = require('./scrapedOrderIngestService')
 
-function createFakeSequelize({ existingOrderNos = [], accountRow = null } = {}) {
+function createFakeSequelize({ existingOrderNos = [], accountRow = { id: 9 }, existingOwner = { channel: 'xiaohongshu', account_id: 9 } } = {}) {
   const calls = []
   return {
     calls,
@@ -23,9 +23,9 @@ function createFakeSequelize({ existingOrderNos = [], accountRow = null } = {}) 
       if (/FROM channel_accounts/i.test(sql)) {
         return [accountRow ? [accountRow] : []]
       }
-      if (/SELECT id FROM orders WHERE order_no/i.test(sql)) {
+      if (/SELECT id, channel, account_id FROM orders WHERE order_no/i.test(sql)) {
         const found = existingOrderNos.includes(options.replacements.orderNo)
-        return [found ? [{ id: 'existing-order' }] : []]
+        return [found ? [{ id: 'existing-order', ...existingOwner }] : []]
       }
       return []
     },
@@ -46,6 +46,7 @@ function makeEnvelope(orders, extra = {}) {
   return {
     type: 'commerce.orders.scraped',
     payload: {
+      accountId: 9,
       adapterId: 'xiaohongshu.qianfan',
       capturedAt: '2026-10-13T10:44:00+08:00',
       orders,
@@ -123,7 +124,7 @@ test('mapOrderRow 缺订单号或超长返回 null（跳过而不是造脏数据
 
 test('handle 拒绝未登记的适配器', async () => {
   const service = createScrapedOrderIngestService({ sequelize: createFakeSequelize() })
-  const result = await service.handle({
+  const result = await service.handle({ nodeId: 11,
     envelope: { payload: { adapterId: 'unknown.adapter', orders: [makeRow()] } }
   })
   assert.equal(result.status, 'rejected')
@@ -132,14 +133,14 @@ test('handle 拒绝未登记的适配器', async () => {
 
 test('handle 空订单返回 processed 不报错', async () => {
   const service = createScrapedOrderIngestService({ sequelize: createFakeSequelize() })
-  const result = await service.handle({ envelope: makeEnvelope([]) })
+  const result = await service.handle({ nodeId: 11, envelope: makeEnvelope([]) })
   assert.equal(result.status, 'processed')
 })
 
 test('handle 单批超限拒绝', async () => {
   const service = createScrapedOrderIngestService({ sequelize: createFakeSequelize() })
   const orders = Array.from({ length: 501 }, (_, i) => makeRow({ 订单号: `P${i}` }))
-  const result = await service.handle({ envelope: makeEnvelope(orders) })
+  const result = await service.handle({ nodeId: 11, envelope: makeEnvelope(orders) })
   assert.equal(result.status, 'rejected')
   assert.equal(result.errorCode, 'BATCH_TOO_LARGE')
 })
@@ -150,7 +151,7 @@ test('handle 按订单号区分新增与更新，并使用 ON DUPLICATE KEY UPDA
     accountRow: { id: 9 }
   })
   const service = createScrapedOrderIngestService({ sequelize })
-  const result = await service.handle({
+  const result = await service.handle({ nodeId: 11,
     envelope: makeEnvelope([
       makeRow({ 订单号: 'P-NEW' }),
       makeRow({ 订单号: 'P-OLD', 状态: '已关闭' })
@@ -182,7 +183,7 @@ test('handle 按订单号区分新增与更新，并使用 ON DUPLICATE KEY UPDA
 
 test('handle 缺订单号的行被跳过并如实计数', async () => {
   const service = createScrapedOrderIngestService({ sequelize: createFakeSequelize() })
-  const result = await service.handle({
+  const result = await service.handle({ nodeId: 11,
     envelope: makeEnvelope([makeRow({ 订单号: '' }), makeRow({ 订单号: 'P-OK' })])
   })
   assert.equal(result.status, 'processed')
@@ -193,11 +194,44 @@ test('handle 数据库异常回滚并返回可重试状态', async () => {
   const sequelize = createFakeSequelize()
   sequelize.query = async () => { throw new Error('mysql down') }
   const service = createScrapedOrderIngestService({ sequelize })
-  const result = await service.handle({ envelope: makeEnvelope([makeRow()]) })
+  const result = await service.handle({ nodeId: 11, envelope: makeEnvelope([makeRow()]) })
   assert.equal(result.status, 'retryable_error')
   assert.equal(result.errorCode, 'ORDER_INGEST_FAILED')
 })
 
 test('适配器映射表覆盖路由层预期的 adapterId', () => {
   assert.equal(ADAPTER_CHANNEL_MAP['xiaohongshu.qianfan'], 'xiaohongshu')
+})
+
+test('订单上报必须携带显式账号和已认证节点', async () => {
+  const sequelize = createFakeSequelize()
+  const service = createScrapedOrderIngestService({ sequelize })
+  assert.equal((await service.handle({ envelope: makeEnvelope([makeRow()]) })).errorCode, 'ACCOUNT_CONTEXT_REQUIRED')
+  assert.equal((await service.handle({ nodeId: 11, envelope: makeEnvelope([makeRow()], { accountId: undefined }) })).errorCode, 'ACCOUNT_CONTEXT_REQUIRED')
+  assert.equal(sequelize.calls.length, 0)
+})
+
+test('未绑定的账号不得写订单，查询同时限定节点和有效租约', async () => {
+  const sequelize = createFakeSequelize({ accountRow: null })
+  const result = await createScrapedOrderIngestService({ sequelize }).handle({ nodeId: 11, envelope: makeEnvelope([makeRow()]) })
+  assert.equal(result.errorCode, 'ACCOUNT_NOT_BOUND')
+  assert.equal(sequelize.calls.some(c => /INSERT/i.test(c.sql)), false)
+  assert.equal(sequelize.calls[0].replacements.accountId, 9)
+  assert.equal(sequelize.calls[0].replacements.nodeId, 11)
+  assert.match(sequelize.calls[0].sql, /l.node_id = :nodeId AND l.expires_at > NOW/)
+})
+
+test('相同订单号属于其他渠道或其他店铺时拒绝整个批次', async () => {
+  for (const existingOwner of [{ channel: 'douyin', account_id: 9 }, { channel: 'xiaohongshu', account_id: 88 }]) {
+    const sequelize = createFakeSequelize({ existingOrderNos: ['P-CONFLICT'], existingOwner })
+    const result = await createScrapedOrderIngestService({ sequelize }).handle({ nodeId: 11, envelope: makeEnvelope([makeRow({ 订单号: 'P-CONFLICT' })]) })
+    assert.equal(result.errorCode, 'ORDER_OWNER_CONFLICT')
+    assert.equal(sequelize.calls.some(c => /INSERT/i.test(c.sql)), false)
+  }
+})
+
+test('事务创建失败返回可重试结果', async () => {
+  const sequelize = createFakeSequelize()
+  sequelize.transaction = async () => { throw new Error('connection unavailable') }
+  assert.equal((await createScrapedOrderIngestService({ sequelize, logger: { error() {} } }).handle({ nodeId: 11, envelope: makeEnvelope([makeRow()]) })).status, 'retryable_error')
 })

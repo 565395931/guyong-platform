@@ -37,7 +37,7 @@ function harness(overrides = {}) {
 test('creates a validated account and never exposes the password hash', async () => {
   const { service, calls } = harness()
   const result = await service.create({
-    username: ' supervisor1 ', password: '123456', email: 'boss@example.com', role: 'supervisor'
+    username: ' supervisor1 ', password: '123456', email: 'boss@example.com', role: 'agent'
   })
   assert.equal(result.username, 'supervisor1')
   assert.equal(result.password, undefined)
@@ -63,7 +63,7 @@ test('protects the current account from disabling, demotion and deletion', async
 test('keeps at least one active administrator', async () => {
   const { service } = harness()
   await assert.rejects(() => service.update(1, { status: 'disabled' }, { actorId: 99 }), /至少保留一个启用状态的管理员/)
-  await assert.rejects(() => service.update(1, { role: 'supervisor' }, { actorId: 99 }), /至少保留一个启用状态的管理员/)
+  await assert.rejects(() => service.update(1, { role: 'agent' }, { actorId: 99 }), /至少保留一个启用状态的管理员/)
   await assert.rejects(() => service.remove(1, { actorId: 99 }), /至少保留一个启用状态的管理员/)
 })
 
@@ -73,4 +73,9 @@ test('resets password using the injected hasher and returns safe user data', asy
   assert.equal(calls[0][2].password, 'hash:new-pass-123')
   assert.equal(result.password, undefined)
   assert.equal(result.username, 'agent1')
+})
+
+test('rejects the retired supervisor role', async () => {
+  const { service } = harness()
+  await assert.rejects(service.create({ username: 'retired', password: 'valid-pass', role: 'supervisor' }), /角色无效/)
 })

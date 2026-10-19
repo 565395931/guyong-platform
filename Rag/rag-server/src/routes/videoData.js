@@ -27,7 +27,7 @@ function createHttpError(message, statusCode) {
 }
 
 function requireManager(req, res, next) {
-  if (!['admin', 'supervisor'].includes(req.user?.role)) {
+  if (!['admin'].includes(req.user?.role)) {
     return res.status(403).json({ success: false, message: '无权访问视频数据管理' })
   }
   return next()

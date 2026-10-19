@@ -1,4 +1,4 @@
-const ROLES = Object.freeze(['admin', 'supervisor', 'agent'])
+const ROLES = Object.freeze(['admin', 'agent'])
 const STATUSES = Object.freeze(['active', 'disabled'])
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 

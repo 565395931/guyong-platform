@@ -76,7 +76,7 @@ function presentDelivery(row = {}) {
 }
 
 function taskAccessScope(user = {}) {
-  if (['admin', 'supervisor'].includes(user.role)) return { clause: '1=1', replacements: {} }
+  if (['admin'].includes(user.role)) return { clause: '1=1', replacements: {} }
   const userId = Number(user.id || user.userId)
   if (!Number.isSafeInteger(userId) || userId <= 0) {
     return { clause: '1=0', replacements: {} }

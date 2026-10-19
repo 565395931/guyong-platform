@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pdd_client as pc  # noqa: E402
 from pdd_reader import (  # noqa: E402
     CHAT_BOX, OUT_DIR, apply_direction_by_color, image_size, masked_customer_name,
-    ocr_region, parse_middle_chat, read_conversation_title,
+    ocr_region, parse_middle_chat, read_conversation_title, fingerprint,
 )
 
 user32 = ctypes.windll.user32
@@ -57,7 +57,10 @@ def main() -> int:
     parser.add_argument("--max-scrolls", type=int, default=40)
     parser.add_argument("--json", default=None)
     parser.add_argument("--ingest", action="store_true")
+    parser.add_argument("--account-id", type=int)
     args = parser.parse_args()
+    if args.ingest and (args.account_id is None or args.account_id <= 0):
+        parser.error("--ingest requires a positive --account-id")
 
     pc.ensure_dpi_aware()
     main = pc.find_main_window()
@@ -109,6 +112,7 @@ def main() -> int:
     collected: list[dict] = []   # 旧 → 新（自然顺序，无需反转）
     seen: set[str] = set()
     quiet = 0
+    scrolls = 0
     for step in range(args.max_scrolls):
         try:
             msgs = read_viewport(main, 2)
@@ -118,10 +122,10 @@ def main() -> int:
         counters: dict[tuple, int] = {}
         fresh = 0
         for m in msgs:
-            token = (m["direction"], m["text"])
+            token = (m["direction"], m.get("timeText", ""), m["text"])
             occ = counters.get(token, 0)
             counters[token] = occ + 1
-            fp = hashlib.sha256(f"pdd|{key}|{m['direction']}||{m['text']}|{occ}".encode()).hexdigest()[:32]
+            fp = fingerprint(name, m["direction"], m.get("timeText", ""), m["text"], occ)
             if fp in seen:
                 continue
             seen.add(fp)
@@ -136,6 +140,7 @@ def main() -> int:
         else:
             quiet = 0
         wheel(-NOTCHES_PER_PAGE)   # 向下滚
+        scrolls += 1
         time.sleep(1.0)
 
     # 回到最新：优先"重新点开会话"（DOM 会定位到底部，最可靠），兜底滚轮下翻
@@ -167,7 +172,7 @@ def main() -> int:
         payloads = []
         for i, m in enumerate(collected):
             payloads.append({
-                "accountId": 5, "channel": "pinduoduo",
+                "accountId": args.account_id, "channel": "pinduoduo",
                 "platformConversationId": key, "platformCustomerId": key,
                 "channelMessageId": m["fp"], "userName": name,
                 "content": m["text"], "messageType": "text", "media": [],

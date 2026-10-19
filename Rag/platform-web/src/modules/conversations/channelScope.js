@@ -5,7 +5,10 @@ const CHANNEL_LABELS = Object.freeze({
   douyin: '抖店',
   pinduoduo: '拼多多',
   taobao: '淘宝 / 千牛',
-  alibaba1688: '1688'
+  alibaba1688: '1688',
+  xiaohongshu: '小红书',
+  wechat_shop: '微信小店',
+  kuaishou: '快手小店'
 })
 
 export function resolveChannelScope(value) {
@@ -30,4 +33,9 @@ export function resolveChannelScope(value) {
     label: CHANNEL_LABELS[fixedChannel],
     filterLocked: true
   }
+}
+
+export function conversationMatchesScope(conversation, { channel = '', accountId = '' } = {}) {
+  return Boolean(conversation) && (!channel || conversation.channel === channel) &&
+    (!accountId || String(conversation.account_id ?? conversation.accountId) === String(accountId))
 }

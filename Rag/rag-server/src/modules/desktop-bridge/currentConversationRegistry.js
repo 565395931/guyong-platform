@@ -17,6 +17,7 @@
  */
 
 const currentKeys = new Map()
+const SNAPSHOT_TTL_MS = 45_000
 
 function normalizeAccountId(accountId) {
   const value = Number(accountId)
@@ -29,7 +30,7 @@ function setCurrentKey(accountId, customerKey) {
   if (id === null) return false
   const key = customerKey ? String(customerKey) : ''
   if (key) {
-    currentKeys.set(id, key)
+    currentKeys.set(id, { key, expiresAt: Date.now() + SNAPSHOT_TTL_MS })
   } else {
     // 读不到当前会话时清除保护：否则一次残留会把该账号的会话永久护住，
     // TTL 再也不归档它（与"读不到就什么都不做"的既有约定保持一致）。
@@ -42,7 +43,13 @@ function setCurrentKey(accountId, customerKey) {
 function getCurrentKey(accountId) {
   const id = normalizeAccountId(accountId)
   if (id === null) return null
-  return currentKeys.get(id) || null
+  const entry = currentKeys.get(id)
+  if (!entry) return null
+  if (entry.expiresAt <= Date.now()) {
+    currentKeys.delete(id)
+    return null
+  }
+  return entry.key
 }
 
 /** 该会话是否正是节点当前打开的那个。 */

@@ -22,7 +22,7 @@ function currentUserId(req) {
 }
 
 function customerVisibility(req, alias = 'c') {
-  if (['admin', 'supervisor'].includes(req.user?.role)) {
+  if (['admin'].includes(req.user?.role)) {
     return { sql: '1=1', replacements: {} }
   }
   return {
@@ -57,12 +57,12 @@ async function buildDailyReport(req) {
   const visibility = customerVisibility(req, 'c')
   const conditions = ['d.communication_date = :reportDate', visibility.sql]
   const replacements = { reportDate, ...visibility.replacements }
-  if (['admin', 'supervisor'].includes(req.user?.role) && req.query.owner_id) {
+  if (['admin'].includes(req.user?.role) && req.query.owner_id) {
     conditions.push('d.owner_id = :ownerId')
     replacements.ownerId = Number(req.query.owner_id)
   }
 
-  const conversationAccess = ['admin', 'supervisor'].includes(req.user?.role)
+  const conversationAccess = ['admin'].includes(req.user?.role)
     ? '1=1'
     : '(cv.claimed_by = :viewerId OR cv.agent_id = :viewerId)'
 
@@ -401,7 +401,7 @@ router.get('/:id/profile', async (req, res) => {
       ...customerRows[0],
       ai_profile: parseJsonField(customerRows[0].ai_profile, null)
     }
-    const conversationVisibility = ['admin', 'supervisor'].includes(req.user?.role)
+    const conversationVisibility = ['admin'].includes(req.user?.role)
       ? '1=1'
       : '(cv.claimed_by = :viewerId OR cv.agent_id = :viewerId)'
 

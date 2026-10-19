@@ -1493,7 +1493,7 @@ const getUsers = async (req, res) => {
     });
 
     // 为坐席角色查询绑定的账号
-    const seatIds = users.filter(u => ['agent', 'supervisor'].includes(u.role)).map(u => u.id);
+    const seatIds = users.filter(u => ['agent'].includes(u.role)).map(u => u.id);
     let bindingsBySeat = {};
 
     if (seatIds.length > 0) {

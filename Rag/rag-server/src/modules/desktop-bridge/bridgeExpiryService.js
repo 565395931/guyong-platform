@@ -59,7 +59,7 @@ function createBridgeExpiryService({
     // last_message_time 已被刷新，这一行就不该再被归档。
     const [result] = await sequelize.query(
       `UPDATE conversations
-          SET conv_status = 'archived', status = 'closed', updated_at = NOW(3)
+          SET conv_status = 'archived', status = 'closed', ai_epoch = ai_epoch + 1, updated_at = NOW(3)
         WHERE id IN (:ids)
           AND conv_status <> 'archived'
           AND last_message_time < DATE_SUB(NOW(3), INTERVAL :ttl MINUTE)`,

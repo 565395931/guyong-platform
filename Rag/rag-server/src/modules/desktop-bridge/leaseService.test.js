@@ -30,6 +30,18 @@ test('lease constants enforce 15-second heartbeat and 45-second expiry', () => {
   assert.equal(LEASE_DURATION_MS, 45_000)
 })
 
+test('reclaim allows an expired other-node lease but rejects a live lease', async () => {
+  const repository = createMemoryRepository()
+  let at = new Date('2026-10-19T10:00:00Z')
+  const service = createLeaseService({ repository, now: () => at })
+  await service.acquire({ accountId: 7, nodeId: 101 })
+  await assert.rejects(() => service.reclaim({ accountId: 7, nodeId: 202 }), error => error.code === 'ACCOUNT_LEASE_CONFLICT')
+  at = new Date(at.getTime() + LEASE_DURATION_MS + 1)
+  const replacement = await service.reclaim({ accountId: 7, nodeId: 202 })
+  assert.equal(replacement.nodeId, 202)
+  assert.equal(replacement.generation, 2)
+})
+
 test('one account has one active lease and explicit takeover revokes the old token', async () => {
   const repository = createMemoryRepository()
   let currentTime = new Date('2026-07-31T10:00:00.000Z')
@@ -52,7 +64,7 @@ test('one account has one active lease and explicit takeover revokes the old tok
   const takeover = await service.takeover({
     accountId: 7,
     nodeId: 202,
-    actor: { id: 9, role: 'supervisor' },
+    actor: { id: 9, role: 'admin' },
     reason: '主电脑计划维护，切换到备用节点'
   })
   assert.equal(takeover.generation, 2)

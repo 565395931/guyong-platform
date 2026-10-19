@@ -12,10 +12,9 @@ test('header leaves navigation and review count in the persistent sidebar', () =
   assert.doesNotMatch(source, /消息审核/)
 })
 
-test('websocket client forwards message review updates to local listeners', () => {
+test('websocket no longer subscribes to deleted review updates', () => {
   const websocketSource = readFileSync(new URL('../../api/websocket.js', import.meta.url), 'utf8')
-  assert.match(websocketSource, /socket\.on\('message_review_updated'/)
-  assert.match(websocketSource, /_dispatch\('message_review_updated'/)
+  assert.doesNotMatch(websocketSource, /message_review_updated/)
 })
 
 test('header routes navigation commands without replacing reminder and user controls', () => {

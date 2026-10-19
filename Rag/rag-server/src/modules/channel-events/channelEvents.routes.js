@@ -11,7 +11,7 @@ function createJwtAuth(options = {}) {
 }
 
 function resolveEventAccessScope(user = {}) {
-  if (['admin', 'supervisor'].includes(user.role)) return { mode: 'all' }
+  if (['admin'].includes(user.role)) return { mode: 'all' }
   if (user.role !== 'agent') return null
   const seatId = Number(user.id)
   return Number.isSafeInteger(seatId) && seatId > 0 ? { mode: 'bound', seatId } : null

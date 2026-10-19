@@ -1,18 +1,8 @@
-/**
- * 快捷指令管理 API
- *
- * 后台用于配置客服快捷回复指令，聚合工作台可通过输入 / 搜索并选择后填入回复框。
- */
-
 const express = require('express')
-const router = express.Router()
-const jwt = require('jsonwebtoken')
-const crypto = require('crypto')
 const { sequelize } = require('../config/database')
-
-const JWT_SECRET = process.env.JWT_SECRET
-const EFFECTIVE_JWT_SECRET = JWT_SECRET || 'rag_secret_key_2024_dev_only'
-
+const { createAuthenticate } = require('../middleware/authenticate')
+const { createQuickReplyPersonalizationService } = require('../modules/system-accounts/quickReplyPersonalization.service')
+const router = express.Router()
 function normalizeShortcut(shortcut = '') {
   const clean = String(shortcut || '').trim()
   if (!clean) return ''
@@ -34,14 +24,6 @@ function toPublicQuickReply(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at
   }
-}
-
-function requireManager(req, res) {
-  if (!['admin', 'supervisor'].includes(req.user?.role)) {
-    res.status(403).json({ success: false, message: '仅管理员或主管可管理快捷指令' })
-    return false
-  }
-  return true
 }
 
 function validatePayload(body = {}) {
@@ -68,209 +50,47 @@ function validatePayload(body = {}) {
   return { data: { title, shortcut, content, category, sortOrder, isEnabled, shared } }
 }
 
-// ========== 认证中间件 ==========
-router.use((req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '')
-  if (!token) {
-    return res.status(401).json({ success: false, message: '未提供认证令牌' })
+
+const repository = {
+  async base(userId) {
+    const [rows] = await sequelize.query('SELECT * FROM quick_replies WHERE created_by IS NULL OR created_by = :userId', { replacements: { userId } })
+    return rows.map(toPublicQuickReply)
+  },
+  async personal(userId) { const [rows] = await sequelize.query('SELECT * FROM quick_reply_personal WHERE user_id = :userId', { replacements: { userId } }); return rows },
+  async overrides(userId) { const [rows] = await sequelize.query('SELECT * FROM quick_reply_overrides WHERE user_id = :userId', { replacements: { userId } }); return rows },
+  async isPersonal(id, userId) { const [rows] = await sequelize.query('SELECT id FROM quick_reply_personal WHERE id = :id AND user_id = :userId', { replacements: { id, userId } }); return rows.length > 0 },
+  createPersonal: (id, payload, userId) => sequelize.query('INSERT INTO quick_reply_personal (id, user_id, payload) VALUES (:id, :userId, :payload)', { replacements: { id, userId, payload: JSON.stringify(payload) } }),
+  updatePersonal: (id, payload, userId) => sequelize.query('UPDATE quick_reply_personal SET payload = :payload WHERE id = :id AND user_id = :userId', { replacements: { id, userId, payload: JSON.stringify(payload) } }),
+  removePersonal: (id, userId) => sequelize.query('DELETE FROM quick_reply_personal WHERE id = :id AND user_id = :userId', { replacements: { id, userId } }),
+  saveOverride: (id, payload, hidden, userId) => sequelize.query(`INSERT INTO quick_reply_overrides (user_id, reply_id, hidden, payload) VALUES (:userId, :id, :hidden, :payload)
+    ON DUPLICATE KEY UPDATE hidden = VALUES(hidden), payload = VALUES(payload)`, { replacements: { id, userId, hidden, payload: payload ? JSON.stringify(payload) : null } }),
+  resetOverrides: userId => sequelize.query('DELETE FROM quick_reply_overrides WHERE user_id = :userId', { replacements: { userId } }),
+  createShared: (id, p, userId) => sequelize.query(`INSERT INTO quick_replies (id, title, shortcut, content, category, is_enabled, sort_order, created_by, updated_by, created_at, updated_at)
+    VALUES (:id, :title, :shortcut, :content, :category, :isEnabled, :sortOrder, NULL, :userId, NOW(), NOW())`, { replacements: { id, ...p, userId } }),
+  updateShared: (id, p, userId) => sequelize.query(`UPDATE quick_replies SET title = :title, shortcut = :shortcut, content = :content, category = :category,
+    is_enabled = :isEnabled, sort_order = :sortOrder, updated_by = :userId WHERE id = :id AND created_by IS NULL`, { replacements: { id, ...p, userId } })
+}
+const service = createQuickReplyPersonalizationService(repository)
+router.use(createAuthenticate())
+function handle(action) {
+  return async (req, res) => {
+    try { res.json({ success: true, data: await action(req) }) }
+    catch (error) {
+      if (error.original?.code === 'ER_DUP_ENTRY') return res.status(409).json({ success: false, message: '触发词已存在，请换一个触发词' })
+      res.status(error.status || 500).json({ success: false, message: error.status ? error.message : '话术操作失败，请重试' }) }
   }
-  try {
-    const decoded = jwt.verify(token, EFFECTIVE_JWT_SECRET)
-    req.user = decoded
-    if (!['admin', 'supervisor', 'agent'].includes(decoded.role)) {
-      return res.status(403).json({ success: false, message: '无权限访问快捷指令' })
-    }
-    next()
-  } catch (err) {
-    return res.status(401).json({ success: false, message: '认证失败: ' + err.message })
-  }
-})
-
-// ========== 快捷指令列表 ==========
-router.get('/', async (req, res) => {
-  try {
-    const { keyword = '', category = '', enabledOnly = '', page = 1, pageSize = 20 } = req.query
-    const limit = Math.min(Math.max(Number(pageSize) || 20, 1), 100)
-    const offset = (Math.max(Number(page) || 1, 1) - 1) * limit
-    const replacements = { limit, offset }
-    const where = []
-
-    if (keyword) {
-      where.push('(title LIKE :keyword OR shortcut LIKE :keyword OR content LIKE :keyword OR category LIKE :keyword)')
-      replacements.keyword = `%${keyword}%`
-    }
-    if (category) {
-      where.push('category = :category')
-      replacements.category = String(category).trim()
-    }
-    if (enabledOnly === 'true' || enabledOnly === '1') {
-      where.push('is_enabled = 1')
-    }
-
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
-    const [rows] = await sequelize.query(
-      `SELECT id, title, shortcut, content, category, is_enabled, sort_order, usage_count, created_by, updated_by, created_at, updated_at
-       FROM quick_replies
-       ${whereSql}
-       ORDER BY sort_order ASC, usage_count DESC, updated_at DESC
-       LIMIT :limit OFFSET :offset`,
-      { replacements }
-    )
-    const [countRows] = await sequelize.query(
-      `SELECT COUNT(*) AS total FROM quick_replies ${whereSql}`,
-      { replacements }
-    )
-
-    res.json({
-      success: true,
-      data: {
-        list: rows.map(toPublicQuickReply),
-        total: Number(countRows[0]?.total || 0)
-      }
-    })
-  } catch (err) {
-    console.error('[QuickReplies] 查询列表失败:', err.message)
-    res.status(500).json({ success: false, message: '查询失败: ' + err.message })
-  }
-})
-
-// ========== 新建快捷指令 ==========
-router.post('/', async (req, res) => {
-  try {
-    if (!requireManager(req, res)) return
-    const parsed = validatePayload(req.body)
-    if (parsed.error) return res.status(400).json({ success: false, message: parsed.error })
-
-    const id = crypto.randomUUID()
-    const userId = req.user.id || req.user.userId || null
-    // 公共话术不记名（created_by 留空），工作台据此把它归到「公共话术」层
-    const createdBy = parsed.data.shared ? null : userId
-    await sequelize.query(
-      `INSERT INTO quick_replies
-        (id, title, shortcut, content, category, is_enabled, sort_order, usage_count, created_by, updated_by, created_at, updated_at)
-       VALUES
-        (:id, :title, :shortcut, :content, :category, :isEnabled, :sortOrder, 0, :createdBy, :userId, NOW(), NOW())`,
-      { replacements: { id, ...parsed.data, createdBy, userId } }
-    )
-
-    const [rows] = await sequelize.query(
-      `SELECT id, title, shortcut, content, category, is_enabled, sort_order, usage_count, created_by, updated_by, created_at, updated_at
-       FROM quick_replies WHERE id = :id LIMIT 1`,
-      { replacements: { id } }
-    )
-
-    res.json({ success: true, data: toPublicQuickReply(rows[0]), message: '创建成功' })
-  } catch (err) {
-    console.error('[QuickReplies] 创建失败:', err.message)
-    if (err.message?.includes('Duplicate')) {
-      return res.status(409).json({ success: false, message: '触发词已存在，请更换后重试' })
-    }
-    res.status(500).json({ success: false, message: '创建失败: ' + err.message })
-  }
-})
-
-// ========== 更新快捷指令 ==========
-router.put('/:id', async (req, res) => {
-  try {
-    if (!requireManager(req, res)) return
-    const parsed = validatePayload(req.body)
-    if (parsed.error) return res.status(400).json({ success: false, message: parsed.error })
-
-    const [existing] = await sequelize.query(
-      `SELECT id FROM quick_replies WHERE id = :id`,
-      { replacements: { id: req.params.id } }
-    )
-    if (existing.length === 0) {
-      return res.status(404).json({ success: false, message: '快捷指令不存在' })
-    }
-
-    const userId = req.user.id || req.user.userId || null
-    const sets = [
-      'title = :title',
-      'shortcut = :shortcut',
-      'content = :content',
-      'category = :category',
-      'is_enabled = :isEnabled',
-      'sort_order = :sortOrder',
-      'updated_by = :userId',
-      'updated_at = NOW()'
-    ]
-    const replacements = { id: req.params.id, ...parsed.data, userId }
-    // 只在显式传了 shared 时才改归属：否则"只改内容"会把公共话术悄悄挪成个人话术
-    if (parsed.data.shared !== undefined) {
-      sets.push('created_by = :createdBy')
-      replacements.createdBy = parsed.data.shared ? null : userId
-    }
-    await sequelize.query(
-      `UPDATE quick_replies SET ${sets.join(', ')} WHERE id = :id`,
-      { replacements }
-    )
-
-    const [rows] = await sequelize.query(
-      `SELECT id, title, shortcut, content, category, is_enabled, sort_order, usage_count, created_by, updated_by, created_at, updated_at
-       FROM quick_replies WHERE id = :id LIMIT 1`,
-      { replacements: { id: req.params.id } }
-    )
-
-    res.json({ success: true, data: toPublicQuickReply(rows[0]), message: '保存成功' })
-  } catch (err) {
-    console.error('[QuickReplies] 更新失败:', err.message)
-    if (err.message?.includes('Duplicate')) {
-      return res.status(409).json({ success: false, message: '触发词已存在，请更换后重试' })
-    }
-    res.status(500).json({ success: false, message: '更新失败: ' + err.message })
-  }
-})
-
-// ========== 启用/停用 ==========
-router.patch('/:id/status', async (req, res) => {
-  try {
-    if (!requireManager(req, res)) return
-    const isEnabled = Boolean(req.body?.isEnabled)
-    const [result] = await sequelize.query(
-      `UPDATE quick_replies SET is_enabled = :isEnabled, updated_at = NOW(), updated_by = :userId WHERE id = :id`,
-      { replacements: { id: req.params.id, isEnabled, userId: req.user.id || req.user.userId || null } }
-    )
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ success: false, message: '快捷指令不存在' })
-    }
-    res.json({ success: true, message: isEnabled ? '已启用' : '已停用' })
-  } catch (err) {
-    console.error('[QuickReplies] 状态更新失败:', err.message)
-    res.status(500).json({ success: false, message: '状态更新失败: ' + err.message })
-  }
-})
-
-// ========== 记录使用次数 ==========
-router.post('/:id/use', async (req, res) => {
-  try {
-    await sequelize.query(
-      `UPDATE quick_replies SET usage_count = usage_count + 1, updated_at = NOW() WHERE id = :id`,
-      { replacements: { id: req.params.id } }
-    )
-    res.json({ success: true, message: '已记录使用' })
-  } catch (err) {
-    console.error('[QuickReplies] 记录使用失败:', err.message)
-    res.status(500).json({ success: false, message: '记录使用失败: ' + err.message })
-  }
-})
-
-// ========== 删除快捷指令 ==========
-router.delete('/:id', async (req, res) => {
-  try {
-    if (!requireManager(req, res)) return
-    const [result] = await sequelize.query(
-      `DELETE FROM quick_replies WHERE id = :id`,
-      { replacements: { id: req.params.id } }
-    )
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ success: false, message: '快捷指令不存在' })
-    }
-    res.json({ success: true, message: '删除成功' })
-  } catch (err) {
-    console.error('[QuickReplies] 删除失败:', err.message)
-    res.status(500).json({ success: false, message: '删除失败: ' + err.message })
-  }
-})
-
+}
+function payload(req) {
+  const parsed = validatePayload(req.body)
+  if (parsed.error) throw Object.assign(new Error(parsed.error), { status: 400 })
+  const { shared, ...data } = parsed.data
+  return data
+}
+router.get('/', handle(req => service.list(req.user, req.query)))
+router.post('/', handle(req => service.create(req.user, payload(req), Boolean(req.body.shared))))
+router.post('/restore-shared', handle(req => service.reset(req.user)))
+router.put('/:id', handle(req => service.update(req.user, req.params.id, payload(req), Boolean(req.body.shared))))
+router.patch('/:id/status', handle(req => service.status(req.user, req.params.id, Boolean(req.body.isEnabled))))
+router.post('/:id/use', handle(req => service.use(req.user, req.params.id)))
+router.delete('/:id', handle(req => service.remove(req.user, req.params.id)))
 module.exports = router

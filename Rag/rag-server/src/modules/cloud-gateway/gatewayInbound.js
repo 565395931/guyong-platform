@@ -1,13 +1,14 @@
 const { createAck } = require('./gatewayProtocol')
 
 class GatewayInboundHandler {
-  constructor({ messagingService, inboundPostProcessor, eventEmitter, accountMapper, accountLoader, afterProcessed }) {
+  constructor({ messagingService, inboundPostProcessor, eventEmitter, accountMapper, accountLoader, afterProcessed, allowShopAutoReply = false }) {
     this.messagingService = messagingService
     this.inboundPostProcessor = inboundPostProcessor
     this.eventEmitter = eventEmitter
     this.accountMapper = accountMapper
     this.accountLoader = accountLoader
     this.afterProcessed = afterProcessed
+    this.allowShopAutoReply = allowShopAutoReply
   }
 
   async handle(envelope) {
@@ -24,6 +25,10 @@ class GatewayInboundHandler {
     if (!message.accountId || !mapping) {
       return createAck(envelope.eventId, 'rejected', { reason: 'unknown accountId' })
     }
+    if ((mapping.channel && mapping.channel !== message.channel) ||
+        (message.gatewayAccountId && mapping.gatewayAccountId !== message.gatewayAccountId)) {
+      return createAck(envelope.eventId, 'rejected', { reason: 'account binding mismatch' })
+    }
     try {
       const service = this.messagingService || require('../messaging/messaging.service')
       const result = await service.processIncomingMessage(message, this.eventEmitter)
@@ -32,7 +37,8 @@ class GatewayInboundHandler {
         const postProcessor = this.inboundPostProcessor || require('../messaging/inboundMessage.service').processInboundMessageAfterStore
         await postProcessor(message, this.eventEmitter, {
           source: 'cloud_gateway',
-          eventId: envelope.eventId
+          eventId: envelope.eventId,
+          ...(message.channel === 'wechat_shop' ? { allowAutoReply: this.allowShopAutoReply === true } : {})
         })
         if (this.afterProcessed) {
           await this.afterProcessed({ envelope, message, mapping, result })

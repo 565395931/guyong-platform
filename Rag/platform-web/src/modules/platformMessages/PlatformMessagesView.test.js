@@ -24,5 +24,5 @@ test('unified platform messages view composes conversations and business events'
   assert.match(source, /getChannelAccountOptions/)
   assert.match(source, /router\.replace/)
   assert.match(source, /DESKTOP_BRIDGE_CHANNELS/)
-  assert.match(source, /需要在线桌面节点/)
+  assert.doesNotMatch(source, /desktop-bridge-status|小店远端中转|本地连接在线时可人工回复/)
 })

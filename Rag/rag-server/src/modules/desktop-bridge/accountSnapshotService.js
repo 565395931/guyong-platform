@@ -34,7 +34,7 @@ function createAccountSnapshotService({
     if (!keysToArchive.length) return 0
     const [result] = await sequelize.query(
       `UPDATE conversations
-          SET conv_status = :archived, status = 'closed', updated_at = NOW(3)
+          SET conv_status = :archived, status = 'closed', ai_epoch = ai_epoch + 1, updated_at = NOW(3)
         WHERE account_id = :accountId
           AND conv_status <> :archived
           AND user_id IN (:keys)`,
@@ -49,7 +49,12 @@ function createAccountSnapshotService({
     if (!keysToRestore.length) return 0
     const [result] = await sequelize.query(
       `UPDATE conversations
-          SET conv_status = :status, pool_type = :pool, status = 'active', updated_at = NOW(3)
+          SET conv_status = CASE
+                WHEN pool_type = 'long_term' THEN 'following'
+                WHEN claimed_by IS NOT NULL THEN 'handling'
+                WHEN pool_type = 'ai_self' THEN 'ai_serving'
+                ELSE 'pending_claim' END,
+              status = 'active', updated_at = NOW(3)
         WHERE account_id = :accountId
           AND conv_status = :archived
           AND user_id IN (:keys)`,
@@ -67,6 +72,7 @@ function createAccountSnapshotService({
   }
 
   async function handle({ envelope, nodeId } = {}) {
+    if (!nodeId) return { status: 'rejected', errorCode: 'NODE_REQUIRED' }
     const payload = envelope && envelope.payload
     const accounts = (payload && Array.isArray(payload.accounts)) ? payload.accounts : []
     if (!accounts.length) {
@@ -78,8 +84,20 @@ function createAccountSnapshotService({
       const accountId = Number(entry && entry.accountId)
       if (!Number.isInteger(accountId) || accountId <= 0) continue
 
+      const authorized = await sequelize.query(
+        `SELECT b.channel_account_id FROM desktop_bridge_bindings b
+          JOIN channel_accounts a ON a.id = b.channel_account_id
+          JOIN desktop_bridge_leases l ON l.channel_account_id = b.channel_account_id
+         WHERE b.channel_account_id = :accountId AND b.enabled = 1 AND a.status = 'active'
+           AND (b.preferred_node_id IS NULL OR b.preferred_node_id = :nodeId)
+           AND l.node_id = :nodeId AND l.expires_at > NOW(3)`,
+        { replacements: { accountId, nodeId }, type: QueryTypes.SELECT }
+      )
+      if (!authorized.length) return { status: 'rejected', errorCode: 'ACCOUNT_NOT_BOUND' }
+
       const currentKey = entry && entry.currentCustomerKey ? String(entry.currentCustomerKey) : ''
       if (!currentKey) {
+        registry.setCurrentKey(accountId, '')
         // 读不到当前会话 -> 跳过，绝不当成"没有会话"
         summary.push({ accountId, skipped: 'no_current_customer' })
         continue
@@ -112,10 +130,10 @@ function createAccountSnapshotService({
       //     实测场景：客户会话倒计时结束后会从列表消失（容器里只剩"暂无会话中用户"），
       //     界面却仍停在那条会话上、顶栏还显示它——只看顶栏永远等不到归档，
       //     表现成"会话已经不在列表里了，却还留在 AI 池"。
-      //   列表读不到 → 退回旧行为：只保留当前会话，其余归档。
+      //   列表读不到 → 跳过归档，读取失败不能证明会话已结束。
       const toArchive = listReadable
         ? knownKeys.filter(key => !activeKeys.includes(key))
-        : knownKeys.filter(key => key !== currentKey)
+        : []
       // 当前会话必须是已存在的会话之一、且没有被归档判定命中，才恢复
       const toRestore = (knownKeys.includes(currentKey) && !toArchive.includes(currentKey))
         ? [currentKey]

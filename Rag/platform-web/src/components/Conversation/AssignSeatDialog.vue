@@ -15,7 +15,7 @@
       <el-select
         v-model="targetSeatId"
         filterable
-        placeholder="选择要分配到的坐席私有池"
+        placeholder="选择要分配到待人工的客服"
         style="width: 100%"
         :loading="loadingSeats"
       >
@@ -29,7 +29,7 @@
           <div class="assign-seat-dialog__option">
             <span>{{ seat.username }}</span>
             <span class="assign-seat-dialog__meta">
-              {{ roleLabel(seat.role) }} · {{ seat.current }}/{{ seat.max }}
+              {{ roleLabel(seat.role) }} · 今日接待 {{ seat.current }} 人
             </span>
           </div>
         </el-option>
@@ -73,15 +73,15 @@ const loadingSeats = ref(false)
 
 const roleLabel = (role) => ({
   agent: '客服',
-  supervisor: '主管'
+
 }[role] || role || '坐席')
 
-const seatLabel = (seat) => `${seat.username} (${roleLabel(seat.role)} ${seat.current}/${seat.max})`
+const seatLabel = (seat) => `${seat.username}（今日接待 ${seat.current} 人）`
 
 const loadSeats = async () => {
   loadingSeats.value = true
   try {
-    const res = await getAssignableSeats()
+    const res = await getAssignableSeats({ account_id: props.conversation?.account_id })
     seats.value = res.data || []
   } catch (error) {
     console.error('[AssignSeatDialog] 获取坐席失败:', error)

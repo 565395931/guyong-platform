@@ -63,12 +63,12 @@ test('stored agent role cannot access legacy administration even with old admin 
   })
 })
 
-test('supervisors keep stats and skill access but cannot list or modify system users', async () => {
+test('retired supervisor role cannot access legacy administration', async () => {
   await withHarness(async ({ request, calls }) => {
     for (const endpoint of endpoints) {
-      assert.equal((await request(endpoint, 2)).status, endpoint[1].startsWith('/users') ? 403 : 200)
+      assert.equal((await request(endpoint, 2)).status, 403)
     }
-    assert.deepEqual(calls, endpoints.slice(0, 4).map(endpoint => endpoint[2]))
+    assert.deepEqual(calls, [])
   })
 })
 

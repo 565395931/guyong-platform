@@ -54,10 +54,11 @@ const payloadSchemas = {
   // 桌面客户端采集的订单（当前：千帆订单页）。行内字段保持开放（record），
   // 由 scrapedOrderIngestService 做字段级校验与映射。
   'commerce.orders.scraped': z.object({
+    accountId,
     adapterId: z.string().trim().min(1).max(120),
     source: z.string().trim().max(60).optional(),
     capturedAt: timestamp.optional(),
-    orders: z.array(z.record(z.unknown())).max(1000)
+    orders: z.array(z.record(z.unknown())).max(500)
   }).strict(),
   'account.state.changed': z.object({
     accountId,

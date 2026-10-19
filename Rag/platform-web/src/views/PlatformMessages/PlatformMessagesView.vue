@@ -42,14 +42,6 @@
       </div>
     </section>
 
-    <div v-if="showDesktopBridgeStatus" class="desktop-bridge-status" role="status">
-      <el-icon><Monitor /></el-icon>
-      <div>
-        <strong>{{ desktopBridgeStatusTitle }}</strong>
-        <span>{{ desktopBridgeStatusText }}</span>
-      </div>
-    </div>
-
     <main class="platform-messages-view__content">
       <WorkbenchView
         v-if="selectedView === 'conversations'"
@@ -81,7 +73,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Monitor, Refresh } from '@element-plus/icons-vue'
+import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import WorkbenchView from '@/views/Workbench/WorkbenchView.vue'
 import ChannelEventsView from '@/views/Channels/ChannelEventsView.vue'
@@ -89,12 +81,12 @@ import { getChannelAccountOptions } from '@/api/channels'
 import { getConversation } from '@/api/conversations'
 import { getConversationCustomerContext } from '@/api/customers'
 import { useConversationStore } from '@/stores/conversation'
+import { conversationMatchesScope } from '@/modules/conversations/channelScope'
 import CustomerWorkspaceDrawer from '@/components/CustomerWorkspace/CustomerWorkspaceDrawer.vue'
 import {
   DESKTOP_BRIDGE_CHANNELS,
   PLATFORM_OPTIONS,
-  normalizeMessageFilters,
-  requiresDesktopBridge
+  normalizeMessageFilters
 } from '@/modules/platformMessages/platformFilters'
 import { DESKTOP_BRIDGE_SENDABLE_CHANNELS } from '@/modules/channels/desktopBridgeAccountForm'
 
@@ -116,6 +108,8 @@ const customerContextLoading = ref(false)
 const customerContextError = ref('')
 const customerContext = ref(null)
 let deepLinkRequestSeq = 0
+let routeRequestSeq = 0
+let accountsRequestSeq = 0
 let applyingRoute = false
 
 const customerDrawerVisible = computed({
@@ -128,10 +122,6 @@ const customerDrawerVisible = computed({
   }
 })
 
-const showDesktopBridgeStatus = computed(() =>
-  selectedView.value === 'conversations' && requiresDesktopBridge(selectedChannel.value)
-)
-
 /**
  * 仍标只读的渠道 = 需要桌面桥接、但发送通道还没实现的那些。
  * 抖音已打通（服务端指令队列 -> 本机节点 -> 写入飞鸽），所以从只读名单里去掉；
@@ -141,19 +131,6 @@ const readOnlyChannels = computed(() =>
   DESKTOP_BRIDGE_CHANNELS.filter(channel => !DESKTOP_BRIDGE_SENDABLE_CHANNELS.includes(channel))
 )
 
-const desktopBridgeSendReady = computed(() =>
-  DESKTOP_BRIDGE_SENDABLE_CHANNELS.includes(selectedChannel.value)
-)
-
-const desktopBridgeStatusTitle = computed(() =>
-  desktopBridgeSendReady.value ? '桌面节点已接入' : '需要在线桌面节点'
-)
-
-const desktopBridgeStatusText = computed(() =>
-  desktopBridgeSendReady.value
-    ? '客户消息实时同步到本地；发送经本机节点写入客户端。节点需保持运行且客户端窗口不要最小化。'
-    : '官方接口不提供客服聊天收发，该渠道尚未接入桌面节点，当前会话保持只读。'
-)
 const viewKey = computed(() => [
   selectedView.value,
   selectedChannel.value || 'all',
@@ -166,19 +143,22 @@ function platformLabel(channel) {
 }
 
 async function loadAccounts() {
+  const requestSeq = ++accountsRequestSeq
   accountsLoading.value = true
   try {
     const params = selectedChannel.value ? { channel: selectedChannel.value } : {}
     const response = await getChannelAccountOptions(params)
+    if (requestSeq !== accountsRequestSeq) return
     accounts.value = response.data || []
     if (selectedAccountId.value && !accounts.value.some(account => String(account.id) === selectedAccountId.value)) {
       selectedAccountId.value = ''
     }
   } catch (error) {
+    if (requestSeq !== accountsRequestSeq) return
     accounts.value = []
     ElMessage.error(error?.message || '账号列表加载失败')
   } finally {
-    accountsLoading.value = false
+    if (requestSeq === accountsRequestSeq) accountsLoading.value = false
   }
 }
 
@@ -188,8 +168,10 @@ async function syncQuery() {
   if (selectedChannel.value) query.channel = selectedChannel.value
   if (selectedView.value !== 'conversations') query.view = selectedView.value
   if (selectedAccountId.value) query.account = selectedAccountId.value
-  if (route.query.conversation) query.conversation = String(route.query.conversation)
-  if (route.query.customerDrawer) query.customerDrawer = String(route.query.customerDrawer)
+  if (conversationMatchesScope(conversationStore.current, { channel: selectedChannel.value, accountId: selectedAccountId.value })) {
+    if (route.query.conversation) query.conversation = String(route.query.conversation)
+    if (route.query.customerDrawer) query.customerDrawer = String(route.query.customerDrawer)
+  }
   await router.replace({ path: '/platform-messages', query })
 }
 
@@ -218,6 +200,8 @@ async function loadDeepLinkContext(query) {
   customerContextError.value = ''
   if (!conversationId) {
     customerContext.value = null
+    deepLinkLoading.value = false
+    customerContextLoading.value = false
     return
   }
 
@@ -229,6 +213,10 @@ async function loadDeepLinkContext(query) {
     if (!conversation) conversation = normalizeConversationResponse(await getConversation(conversationId))
     if (requestSeq !== deepLinkRequestSeq) return
     if (!conversation?.id) throw new Error('无法加载目标会话')
+    if (!conversationMatchesScope(conversation, { channel: selectedChannel.value, accountId: selectedAccountId.value })) {
+      conversationStore.clearCurrent()
+      return
+    }
     conversationStore.updateConversation(conversation)
     conversationStore.selectConversation(conversationStore.list.find(item => item.id === conversation.id) || conversation)
     if (['1', 'true'].includes(String(query.customerDrawer || '').toLowerCase())) {
@@ -269,13 +257,23 @@ async function refreshCurrentView() {
 watch(
   () => route.query,
   async query => {
+    const requestSeq = ++routeRequestSeq
     const normalized = normalizeMessageFilters({ channel: query.channel, view: query.view })
     const channelChanged = normalized.channel !== selectedChannel.value
+    const scopeChanged = channelChanged || String(query.account || '') !== selectedAccountId.value || normalized.view !== selectedView.value
+    if (scopeChanged) {
+      ++deepLinkRequestSeq
+      conversationStore.clearCurrent()
+      customerContext.value = null
+      customerContextLoading.value = false
+      deepLinkLoading.value = false
+    }
     applyingRoute = true
     selectedChannel.value = normalized.channel
     selectedView.value = normalized.view
     selectedAccountId.value = String(query.account || '')
     if (channelChanged || accounts.value.length === 0) await loadAccounts()
+    if (requestSeq !== routeRequestSeq) return
     applyingRoute = false
     await loadDeepLinkContext(query)
   },
@@ -323,21 +321,6 @@ watch(
 .account-select { width: 210px; }
 .account-option__platform { float: right; margin-left: 20px; color: #8a96a3; font-size: 11px; }
 
-.desktop-bridge-status {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 14px;
-  border-bottom: 1px solid #efd0ad;
-  background: #fff8ef;
-  color: #7c4d25;
-
-  .el-icon { flex-shrink: 0; font-size: 18px; }
-  div { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-  strong { font-size: 13px; white-space: nowrap; }
-  span { overflow: hidden; color: #916b49; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-}
-
 @media (max-width: 1100px) {
   .message-toolbar { align-items: stretch; flex-direction: column; }
   .message-toolbar__controls { justify-content: space-between; }
@@ -348,7 +331,5 @@ watch(
   .message-toolbar { padding: 8px; }
   .message-toolbar__controls { align-items: stretch; flex-wrap: wrap; }
   .account-select { flex-basis: 100%; }
-  .desktop-bridge-status div { align-items: flex-start; flex-direction: column; gap: 1px; }
-  .desktop-bridge-status span { white-space: normal; }
 }
 </style>

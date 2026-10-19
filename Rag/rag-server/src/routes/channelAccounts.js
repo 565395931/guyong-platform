@@ -7,7 +7,7 @@
  * - GET    /api/v1/channel-accounts/:id     查询单个账号
  * - DELETE /api/v1/channel-accounts/:id     解绑账号
  *
- * 认证：需要 JWT Token（admin/supervisor 权限）
+ * 认证：需要 JWT Token（admin 权限）
  */
 
 const express = require('express')
@@ -154,11 +154,21 @@ async function getChannelDefinition(code, { includeInactive = false } = {}) {
 }
 
 // ========== 认证中间件 ==========
-router.use(createAuthenticate(), (req, res, next) => {
-  if (!['admin', 'supervisor'].includes(req.user.role)) {
-    return res.status(403).json({ success: false, message: '无权限管理渠道账号' })
+router.use(createAuthenticate())
+router.use(async (req, res, next) => {
+  if (req.user.role === 'admin') return next()
+  if (req.method === 'GET' && req.path === '/') {
+    try {
+      const [rows] = await sequelize.query(`SELECT a.id, a.channel, a.account_name, a.status, a.adapter_type
+        FROM channel_accounts a WHERE EXISTS (SELECT 1 FROM seat_account_bindings b
+          WHERE b.account_id = a.id AND b.seat_id = :seatId AND b.status = 'active')
+          AND (:channel IS NULL OR a.channel = :channel) AND (:status IS NULL OR a.status = :status)
+        ORDER BY a.id`, { replacements: { seatId: req.user.id,
+          channel: req.query.channel || null, status: req.query.status || null } })
+      return res.json({ success: true, data: rows })
+    } catch { return res.status(503).json({ success: false, message: '接待账号暂时无法读取，请重试' }) }
   }
-  return next()
+  return res.status(403).json({ success: false, message: '仅管理员可管理渠道账号' })
 })
 
 // ========== 绑定渠道账号 ==========
@@ -724,6 +734,15 @@ router.patch('/:id', async (req, res) => {
   }
 })
 
+router.get('/:id/deletion-preview', async (req, res) => {
+  try {
+    const account = await ChannelAccount.findByPk(req.params.id)
+    if (!account || account.adapter_type !== 'wechat_shop_cloud') return res.status(404).json({ success: false, message: '小店不存在' })
+    const { previewShopDeletion } = require('../modules/cloud-gateway/shopAccountDeletion')
+    res.json({ success: true, data: { name: account.account_name, counts: await previewShopDeletion(sequelize, account.id) } })
+  } catch { res.status(500).json({ success: false, message: '无法读取删除范围，请重试' }) }
+})
+
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params
@@ -731,6 +750,12 @@ router.delete('/:id', async (req, res) => {
     const account = await ChannelAccount.findByPk(id)
     if (!account) {
       return res.status(404).json({ success: false, message: '账号不存在' })
+    }
+
+    if (account.adapter_type === 'wechat_shop_cloud') {
+      const { deleteShopAccount } = require('../modules/cloud-gateway/shopAccountDeletion')
+      const data = await deleteShopAccount({ sequelize, account, manager: req.app.get('localShopConnection'), confirmation: req.body?.confirmName })
+      return res.json({ success: true, message: '本地店铺资料已删除', data })
     }
 
     // 如果是 WAHA 适配器，同时删除 WAHA session
@@ -773,7 +798,7 @@ router.delete('/:id', async (req, res) => {
     res.json({ success: true, message: '渠道账号已解绑' })
   } catch (err) {
     console.error('[ChannelAccounts] 解绑失败:', err.message)
-    res.status(500).json({ success: false, message: '解绑失败: ' + err.message })
+    res.status(err.status || 500).json({ success: false, message: err.status === 400 ? err.message : '删除未完成，请检查连接后重试；远端消息和其他店铺未删除' })
   }
 })
 

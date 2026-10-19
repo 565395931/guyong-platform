@@ -12,7 +12,7 @@ test('agent gets review and daily business tools but no system settings', async 
   const buildHeaderNavigation = await loadNavigation()
   const result = buildHeaderNavigation('agent')
 
-  assert.equal(result.review.path, '/message-reviews')
+  assert.equal(Object.hasOwn(result, 'review'), false)
   assert.deepEqual(result.business.map(item => item.path), [
     '/statistics',
     '/statistics/after-sales',
@@ -25,14 +25,9 @@ test('agent gets review and daily business tools but no system settings', async 
   assert.deepEqual(result.settings, [])
 })
 
-test('supervisor gets review and business tools but no admin settings', async () => {
-  const buildHeaderNavigation = await loadNavigation()
-  const result = buildHeaderNavigation('supervisor')
-
-  assert.equal(result.review.path, '/message-reviews')
-  assert.equal(result.business.length, 8)
-  assert.equal(result.business.some(item => item.path === '/warehouses'), true)
-  assert.deepEqual(result.settings, [])
+test('retired supervisor receives no commands', async () => {
+  const build = await loadNavigation()
+  assert.deepEqual(build('supervisor'), { business: [], settings: [] })
 })
 
 test('admin gets AI configuration and functional modules', async () => {
@@ -40,7 +35,7 @@ test('admin gets AI configuration and functional modules', async () => {
   const result = buildHeaderNavigation('admin')
 
   assert.deepEqual(result.settings.map(item => item.path), [
-    '/settings/ai',
+    '/settings/general', '/settings/accounts', '/settings/ai', '/settings/model-test',
     '/modules',
     '/settings/video-data'
   ])
@@ -49,16 +44,7 @@ test('admin gets AI configuration and functional modules', async () => {
 test('unknown roles receive no header commands', async () => {
   const buildHeaderNavigation = await loadNavigation()
   assert.deepEqual(buildHeaderNavigation(''), {
-    review: null,
     business: [],
     settings: []
   })
-})
-
-test('normalizes the actionable review count defensively', async () => {
-  const { normalizeReviewCount } = await import('./headerNavigation.js')
-  assert.equal(typeof normalizeReviewCount, 'function')
-  assert.equal(normalizeReviewCount({ mine: 3, public: 4 }), 7)
-  assert.equal(normalizeReviewCount({ mine: '2', public: null }), 2)
-  assert.equal(normalizeReviewCount({ mine: -1, public: 'bad' }), 0)
 })

@@ -164,7 +164,7 @@ function createBridgeCommandService({
       }
     })
 
-    if (result.status === 'accepted' || result.status === 'succeeded') {
+    if (result.status === 'succeeded') {
       await markCommand(commandId, 'succeeded', {
         platformMessageId: result.platformMessageId || null,
         acceptedAt: new Date(), completedAt: new Date()
@@ -199,13 +199,28 @@ function createBridgeCommandService({
   }
 
   /** 处理节点回的 message.command.status。 */
-  async function handleStatus({ envelope } = {}) {
+  async function handleStatus({ envelope, nodeId } = {}) {
     const payload = envelope && envelope.payload
     if (!payload || !payload.commandId) {
       return { status: 'rejected', errorCode: 'COMMAND_ID_REQUIRED' }
     }
+    if (!nodeId) return { status: 'rejected', errorCode: 'NODE_REQUIRED' }
+    const rows = await sequelize.query(
+      'SELECT node_id, state FROM desktop_bridge_commands WHERE command_id = :commandId',
+      { replacements: { commandId: payload.commandId }, type: QueryTypes.SELECT }
+    )
+    if (!rows[0] || Number(rows[0].node_id) !== Number(nodeId)) {
+      return { status: 'rejected', errorCode: 'COMMAND_NODE_MISMATCH' }
+    }
+    if (['succeeded', 'failed'].includes(rows[0].state) ||
+        (rows[0].state === 'expired' && payload.status === 'accepted')) return { status: 'duplicate' }
+    if (payload.status === 'accepted') {
+      await markCommand(payload.commandId, 'accepted', { acceptedAt: new Date() })
+      return { status: 'processed' }
+    }
     const waiter = pending.get(payload.commandId)
     if (waiter) {
+      pending.delete(payload.commandId)
       waiter.resolve({
         status: payload.status,
         platformMessageId: payload.platformMessageId,

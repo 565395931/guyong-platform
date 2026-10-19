@@ -1,0 +1,165 @@
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
+const { FileSaasStore } = require('../src/saas/fileSaasStore')
+const { ModelBilling, DEFAULT_PRICING, UNIT, ratesAt, charge, normalizeUsage } = require('../src/saas/modelBilling')
+const { normalizeBaseUrl } = require('../src/saas/openAiCompatibleClient')
+async function fixture(t, complete) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'model-billing-'))
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
+  const store = new FileSaasStore(path.join(directory, 'store.json'))
+  await store.transaction(d => { d.tenants.push({ id: 'a', status: 'active' }, { id: 'b', status: 'active' }); d.users.push({ id: 'u', tenantId: 'a', role: 'tenant_admin', status: 'active' }) })
+  const routes = []
+  const billing = new ModelBilling({ store, now: () => '2026-10-10T00:00:00Z', messaging: { resolvedModelConfig: async () => ({ model: 'text-source', visionModel: 'vision-source', apiKey: 'secret', baseUrl: 'https://example.test/v1' }) }, modelClient: { complete: async (config, opts) => { routes.push(config); return complete ? complete(config, opts) : { content: '测试回答', usage: { prompt_tokens: 1000, completion_tokens: 500, prompt_cache_hit_tokens: 200 } } } } })
+  await billing.issue({ tenantId: 'a', actorId: 'operator', reference: 'test-order', test: true, idempotencyKey: 'package-1' })
+  return { billing, store, routes, identity: { id: 'device', tenantId: 'a' } }
+}
+const body = { model: 'customer-auto', messages: [{ role: 'user', content: '测试' }], max_tokens: 500 }
+test('full completion URLs normalize without duplicating v1/chat/completions', () => {
+  assert.equal(normalizeBaseUrl('https://aigw.telecomjs.com/v1/chat/completions'), 'https://aigw.telecomjs.com/v1')
+  assert.equal(normalizeBaseUrl('https://api.deepseek.com'), 'https://api.deepseek.com/v1')
+  assert.equal(normalizeBaseUrl('https://example.test/compatible-mode/v1/'), 'https://example.test/compatible-mode/v1')
+})
+test('Beijing weekday peak boundaries, weekends, text/vision same tariffs', () => {
+  for (const [time, band] of [['2026-10-12T00:59:59Z','text'],['2026-10-12T01:00:00Z','peakMorning'],['2026-10-12T04:00:00Z','text'],['2026-10-12T06:00:00Z','peakAfternoon'],['2026-10-12T10:00:00Z','text'],['2026-10-10T01:30:00Z','text']]) {
+    assert.equal(ratesAt(DEFAULT_PRICING, 'text', time).band, band)
+    assert.equal(ratesAt(DEFAULT_PRICING, 'vision', time).band, `vision:${band}`)
+  }
+})
+test('integer arithmetic bills cache separately; vision has no discount', () => {
+  const usage = normalizeUsage({ prompt_tokens: 1000000, prompt_tokens_details: { cached_tokens: 200000 }, completion_tokens: 1000000 })
+  assert.deepEqual(charge(usage, DEFAULT_PRICING.text, 60), { sale: 4804000000, cost: 2882400000, profit: 1921600000 })
+  assert.equal(charge(usage, DEFAULT_PRICING.text, 100).profit, 0)
+  assert.equal(charge({ uncached: 0, cached: 1, output: 0 }, DEFAULT_PRICING.text, 60).sale, 20)
+  assert.throws(() => normalizeUsage({ prompt_tokens: 1, completion_tokens: 0, prompt_cache_hit_tokens: 2 }))
+  assert.throws(() => normalizeUsage(null))
+})
+test('100 yuan package belongs to user, test grants are not paid revenue and replay is idempotent', async t => {
+  const f = await fixture(t)
+  await f.billing.issue({ tenantId: 'a', actorId: 'operator', reference: 'test-order', test: true, idempotencyKey: 'package-1' })
+  const d = await f.store.snapshot()
+  assert.equal(d.packageOrders.length, 1); assert.equal(d.packageOrders[0].userId, 'u'); assert.equal(d.packageOrders[0].paidAmount, 0)
+  assert.equal((await f.billing.overview('a')).balance, 100 * UNIT)
+  assert.equal((await f.billing.overview('b')).balance, 0)
+})
+test('text settles actual usage, repeats reuse response and do not call upstream twice', async t => {
+  const f = await fixture(t)
+  const result = await f.billing.complete(f.identity, body, 'call-1')
+  assert.deepEqual(await f.billing.complete(f.identity, body, 'call-1'), result)
+  const d = await f.billing.overview()
+  assert.equal(f.routes.length, 1); assert.equal(d.calls[0].upstreamModel, 'text-source')
+  assert.equal(d.totals.sale, 2804000); assert.equal(d.totals.profit, 1121600); assert.equal(d.balance, 100*UNIT - 2804000)
+  await assert.rejects(f.billing.complete(f.identity, { ...body, messages: [{ role:'user', content:'变更内容' }] }, 'call-1'), /不同内容/)
+})
+test('any image in history routes whole request to vision and records zero gross margin', async t => {
+  const f = await fixture(t)
+  await f.billing.complete(f.identity, { ...body, messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AA==' } }] }, ...body.messages] }, 'image-1')
+  assert.equal(f.routes[0].model, 'vision-source')
+  assert.equal((await f.billing.overview()).totals.profit, 0)
+  assert.equal('cost' in (await f.billing.overview('a')).calls[0], false)
+})
+test('parallel same request claims once; depleted or another tenant cannot spend', async t => {
+  let release
+  const f = await fixture(t, () => new Promise(r => { release = r }))
+  const first = f.billing.complete(f.identity, body, 'parallel-1')
+  while (!release) await new Promise(r => setImmediate(r))
+  await assert.rejects(f.billing.complete(f.identity, body, 'parallel-1'), /已提交/)
+  release({ content:'ok', usage:{prompt_tokens:1,completion_tokens:1} }); await first
+  await assert.rejects(f.billing.complete({ id:'other', tenantId:'b' }, body, 'b-call'), /余额不足/)
+  assert.equal(f.routes.length, 1)
+})
+test('definite rejection releases funds; uncertainty stays reserved with audited reconciliation', async t => {
+  const f = await fixture(t, () => { throw Object.assign(new Error('rejected'), { code: 'model_http_error' }) })
+  await assert.rejects(f.billing.complete(f.identity, body, 'fail-1'))
+  assert.equal((await f.billing.overview()).balance, 100*UNIT)
+  const g = await fixture(t, () => { throw Object.assign(new Error('timeout'), { code:'model_timeout' }) })
+  await assert.rejects(g.billing.complete(g.identity, body, 'unknown-1'))
+  const d = await g.billing.overview(); assert.equal(d.calls[0].status, 'pending_reconciliation'); assert.ok(d.balance < 100*UNIT)
+  await g.billing.reconcile({ callId:d.calls[0].id, refund:true, reference:'supplier-confirmation', actorId:'operator' })
+  assert.equal((await g.billing.overview()).balance, 100*UNIT)
+  await assert.rejects(g.billing.reconcile({ callId:d.calls[0].id, refund:true, reference:'same', actorId:'operator' }))
+})
+test('missing usage cannot silently become a free completed request; actual excess is recorded', async t => {
+  const f = await fixture(t, () => ({ content:'ok', usage:null }))
+  await assert.rejects(f.billing.complete(f.identity, body, 'missing-1'), /核账/)
+  const g = await fixture(t, () => ({ content:'ok', usage:{prompt_tokens:300000,completion_tokens:600} }))
+  await g.billing.complete(g.identity, body, 'excess-1')
+  assert.equal((await g.billing.overview()).calls[0].overReserve, true)
+})
+
+test('direct balance edits are audited, isolated, idempotent and reject stale values', async t => {
+  const f = await fixture(t)
+  const input = { tenantId: 'a', actorId: 'operator', amountYuan: 9.5, expectedBalance: 100*UNIT, reference: '余额测试', idempotencyKey: 'adjust-1' }
+  await f.billing.setBalance(input)
+  await f.billing.setBalance(input)
+  assert.equal((await f.billing.wallet('a')).balance, 9.5*UNIT)
+  assert.equal((await f.billing.wallet('b')).balance, 0)
+  await assert.rejects(f.billing.setBalance({ ...input, idempotencyKey: 'adjust-2' }), /余额已变化/)
+  const result = await f.billing.complete(f.identity, body, 'after-edit')
+  assert.equal(result.billing.balance, 9.5*UNIT - 2804000)
+  const before = await f.billing.wallet('a')
+  await f.billing.setBalance({ ...input, amountYuan: 50, expectedBalance: before.balance, idempotencyKey: 'adjust-3' })
+  const replay = await f.billing.complete(f.identity, body, 'after-edit')
+  assert.equal(replay.billing.balance, 50*UNIT)
+  assert.equal(f.routes.length, 1)
+  const d = await f.store.snapshot()
+  assert.equal(d.auditEntries.filter(x => x.action === 'billing.balance_adjustment').length, 2)
+})
+test('empty answer with provider usage is billed and visible as a failed response', async t => {
+  const f = await fixture(t, () => { throw Object.assign(new Error('empty'), { code:'model_empty_response', usage:{prompt_tokens:1000,completion_tokens:500,prompt_cache_hit_tokens:200} }) })
+  await assert.rejects(f.billing.complete(f.identity, body, 'empty'))
+  const d = await f.billing.overview()
+  assert.equal(d.calls[0].status, 'failed_billed')
+  assert.equal(d.balance, 100*UNIT - 2804000)
+  assert.equal(d.totals.sale, 2804000)
+})
+
+test('rolling 300 calls per account preserves lifetime money and blocks expired replay', async t => {
+  const f = await fixture(t)
+  await f.billing.complete(f.identity, body, 'oldest')
+  const original = (await f.store.snapshot()).modelCalls[0]
+  await f.store.transaction(d => {
+    for (const tenantId of ['a', 'b']) for (let i=0;i<301;i++) {
+      const id = tenantId + '-seed-' + i
+      d.modelCalls.push({ ...original, id, tenantId, key:id })
+      d.moneyEntries.push({ id:id+'-money',tenantId,callId:id,kind:'model_reserve',delta:-original.sale })
+    }
+  })
+  const d = await f.store.snapshot()
+  assert.equal(d.modelCalls.filter(c=>c.tenantId==='a').length,300)
+  assert.equal(d.modelCalls.filter(c=>c.tenantId==='b').length,300)
+  assert.equal(d.modelCalls.some(c=>c.key==='oldest'),false)
+  const stats = await f.billing.overview('a')
+  assert.equal(stats.totals.sale, original.sale * 302)
+  assert.equal((await f.billing.overview()).totals.profit, original.profit * 603)
+  assert.equal(stats.balance,100*UNIT-original.sale*302)
+  await assert.rejects(f.billing.complete(f.identity,body,'oldest'), /日志已过期/)
+  assert.equal(f.routes.length,1)
+  const logs = await f.billing.logs('b')
+  assert.equal(logs.calls.length,300)
+  assert.ok(logs.calls.every(c=>c.tenantId==='b'))
+  assert.equal(logs.calls[0].id,'b-seed-300')
+  assert.equal((await f.billing.overview(undefined,{includeCalls:false})).calls.length,0)
+  const reopened = new ModelBilling({ ...f.billing, store:new FileSaasStore(f.store.filePath) })
+  assert.equal((await reopened.overview('a')).totals.sale,original.sale*302)
+})
+test('evicted pending call can still reconcile without losing its hold or counting twice', async t => {
+  const f = await fixture(t,()=>{throw Object.assign(new Error('timeout'),{code:'model_timeout'})})
+  await assert.rejects(f.billing.complete(f.identity,body,'pending-oldest'))
+  const oldest=(await f.store.snapshot()).modelCalls[0]
+  await f.store.transaction(d=>{
+    for(let i=0;i<300;i++) d.modelCalls.push({...oldest,id:'failed-'+i,key:'failed-'+i,status:'failed',reserved:0})
+  })
+  assert.equal((await f.store.snapshot()).modelCalls.length,300)
+  assert.equal((await f.store.snapshot()).pendingModelCalls.length,1)
+  assert.ok((await f.billing.wallet('a')).balance<100*UNIT)
+  await f.billing.reconcile({callId:oldest.id,usage:{prompt_tokens:1000,completion_tokens:500,prompt_cache_hit_tokens:200},reference:'核账测试',actorId:'operator'})
+  assert.equal((await f.store.snapshot()).pendingModelCalls.length,0)
+  assert.equal((await f.billing.overview('a')).totals.sale,2804000)
+  assert.equal((await f.billing.wallet('a')).balance,100*UNIT-2804000)
+  await f.store.transaction(()=>{})
+  assert.equal((await f.billing.overview('a')).totals.sale,2804000)
+  await assert.rejects(f.billing.complete(f.identity,body,'pending-oldest'),/日志已过期/)
+})

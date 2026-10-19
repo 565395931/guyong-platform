@@ -7,16 +7,16 @@ import {
   resolveAccountChannel
 } from './channelNavigation.js'
 
-test('single-owner admin sees system settings without team account management', () => {
+test('admin sees system settings and team account management', () => {
   const menu = buildSidebarMenu('admin')
   assert.deepEqual(menu.map(item => item.label), ['客服工作', '业务运营', '系统设置'])
   assert.deepEqual(menu[0].children.map(item => item.path), [
-    '/platform-messages', '/customer-service-accounts', '/message-reviews'
+    '/platform-messages', '/customer-service-accounts'
   ])
   assert.deepEqual(menu[1].children.map(item => item.path), [
     '/statistics', '/statistics/after-sales', '/campaigns', '/video', '/orders', '/catalog', '/warehouses', '/customers'
   ])
-  assert.deepEqual(menu[2].children.map(item => item.path), ['/settings/ai', '/modules', '/settings/video-data'])
+  assert.deepEqual(menu[2].children.map(item => item.path), ['/settings/general', '/settings/accounts', '/settings/ai', '/settings/model-test', '/modules', '/settings/video-data'])
   assert.deepEqual(menu[0].children[0].children.map(item => item.label), [
     '全部', '微信客服', '微信小程序', 'WhatsApp', '抖店', '拼多多', '淘宝 / 千牛', '1688',
     '小红书', '微信小店', '快手小店'
@@ -40,21 +40,18 @@ test('agent sees customer work and business operations but no system settings', 
   const menu = buildSidebarMenu('agent')
   assert.deepEqual(menu.map(item => item.label), ['客服工作', '业务运营'])
   assert.deepEqual(menu.flatMap(item => item.children.map(child => child.path)), [
-    '/platform-messages', '/message-reviews', '/statistics', '/statistics/after-sales',
+    '/platform-messages', '/statistics', '/statistics/after-sales',
     '/campaigns', '/video', '/orders', '/catalog', '/customers'
   ])
 })
 
-test('supervisor gets customer account management without admin settings', () => {
-  const menu = buildSidebarMenu('supervisor')
-  assert.equal(menu[0].children.some(item => item.path === '/customer-service-accounts'), true)
-  assert.equal(menu[1].children.some(item => item.path === '/warehouses'), true)
-  assert.equal(menu.some(item => item.key === 'system-settings'), false)
+test('retired supervisor receives no sidebar entries', () => {
+  assert.deepEqual(buildSidebarMenu('supervisor'), [])
 })
 
 test('route roles are enforced explicitly', () => {
-  assert.equal(hasRequiredRole(['admin', 'supervisor'], 'admin'), true)
-  assert.equal(hasRequiredRole(['admin', 'supervisor'], 'agent'), false)
+  assert.equal(hasRequiredRole(['admin'], 'admin'), true)
+  assert.equal(hasRequiredRole(['admin'], 'agent'), false)
   assert.equal(hasRequiredRole(undefined, 'agent'), true)
 })
 

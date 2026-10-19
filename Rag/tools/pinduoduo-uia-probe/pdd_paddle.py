@@ -12,21 +12,31 @@ from __future__ import annotations
 
 import os
 import threading
+import hashlib
+import subprocess
+import tempfile
 
 os.environ.setdefault("FLAGS_use_mkldnn", "0")
 # 模型/缓存放项目目录，不占 C 盘（PaddleX 3.x 用 PADDLE_PDX_CACHE_HOME 指定缓存根）
-_cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paddlex_home")
+_cache_dir = os.environ.get("PADDLE_PDX_CACHE_HOME") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "paddlex_home")
 # ⚠️ 飞桨 C++ 层在**非 ASCII 路径**下读模型会失败（报空 JSON parse error）。
 # 项目路径含中文（E:\平台建设）时改走英文 junction 入口；目录联接在仓库外，
 # 见 ops 文档：mklink /J E:\guyong-platform E:\平台建设\guyong-platform
 if any(ord(ch) > 127 for ch in _cache_dir):
-    # junction 指向仓库根（E:\guyong-platform → E:\平台建设\guyong-platform）
-    _old_root = os.sep.join(["E:", "平台建设", "guyong-platform"])
-    _ascii_root = os.sep.join(["E:", "guyong-platform"])
-    _ascii_dir = _cache_dir.replace(_old_root, _ascii_root, 1)
-    if not any(ord(ch) > 127 for ch in _ascii_dir) and os.path.isdir(_ascii_dir):
-        _cache_dir = _ascii_dir
-os.environ.setdefault("PADDLE_PDX_CACHE_HOME", _cache_dir)
+    # 给当前模型目录建立唯一 ASCII 入口；模型文件仍位于项目内。
+    os.makedirs(_cache_dir, exist_ok=True)
+    alias_parent = os.path.join(tempfile.gettempdir(), "guyong-ocr-links")
+    if any(ord(ch) > 127 for ch in alias_parent):
+        raise RuntimeError("Set PADDLE_PDX_CACHE_HOME to an ASCII directory for PaddleOCR")
+    os.makedirs(alias_parent, exist_ok=True)
+    alias = os.path.join(alias_parent, hashlib.sha256(_cache_dir.encode()).hexdigest()[:16])
+    if not os.path.lexists(alias):
+        subprocess.run(["cmd", "/c", "mklink", "/J", alias, _cache_dir],
+                       check=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    if not os.path.samefile(alias, _cache_dir):
+        raise RuntimeError("OCR cache junction points to a different directory")
+    _cache_dir = alias
+os.environ["PADDLE_PDX_CACHE_HOME"] = _cache_dir
 
 _lock = threading.Lock()
 _engine = None

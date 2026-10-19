@@ -14,22 +14,28 @@ function initCloudGateway({ eventEmitter, accountEntries = [], options = {} } = 
     const { sequelize } = require('../../config/database')
     const [updateResult, updateMetadata] = await sequelize.query(
       `UPDATE plat_messages
-       SET send_status = :sendStatus,
+       SET content = CASE WHEN :sendStatus IN ('failed', 'unknown') THEN JSON_SET(COALESCE(content, JSON_OBJECT()), '$.sendError', :sendError) WHEN :sendStatus = 'sent' THEN JSON_REMOVE(content, '$.sendError') ELSE content END,
+           send_status = CASE WHEN :sendStatus = 'received' AND send_status IN ('sent', 'failed', 'unknown') THEN send_status WHEN :sendStatus = 'unknown' AND send_status = 'sent' THEN send_status ELSE :sendStatus END,
            channel_message_id = COALESCE(:channelMessageId, channel_message_id),
            updated_at = NOW()
        WHERE id = :localMessageId`,
       {
         replacements: {
           sendStatus: payload.sendStatus,
+          sendError: payload.errorMessage || (payload.sendStatus === 'unknown' ? '发送结果待确认，请勿重复发送' : '平台拒绝发送'),
           channelMessageId: payload.channelMessageId || null,
           localMessageId: payload.localMessageId || payload.commandId
         }
       }
     )
-    return updateMetadata?.affectedRows ?? updateResult?.affectedRows ?? 0
+    const [rows] = await sequelize.query('SELECT send_status FROM plat_messages WHERE id = :localMessageId LIMIT 1', { replacements: { localMessageId: payload.localMessageId || payload.commandId } })
+    return { affectedRows: rows.length ? 1 : 0, sendStatus: rows[0]?.send_status || payload.sendStatus }
   })
-  setGatewayLink(link)
+  if (options.registerRuntime !== false) setGatewayLink(link)
   const inbound = new GatewayInboundHandler({
+    messagingService: options.messagingService,
+    inboundPostProcessor: options.inboundPostProcessor,
+    allowShopAutoReply: options.allowShopAutoReply === true,
     eventEmitter,
     accountMapper,
     accountLoader: options.accountLoader,
@@ -58,9 +64,11 @@ function initCloudGateway({ eventEmitter, accountEntries = [], options = {} } = 
   })
   link.on('status', async envelope => {
     const payload = envelope.payload || {}
-    const sendStatus = payload.status === 'failed' ? 'failed' : payload.status === 'sent' ? 'sent' : 'received'
+    let sendStatus = payload.status === 'failed' ? 'failed' : payload.status === 'sent' ? 'sent' : payload.status === 'unknown' ? 'unknown' : 'received'
     try {
-      const affectedRows = await updateMessageStatus({ ...payload, sendStatus })
+      const updateResult = await updateMessageStatus({ ...payload, sendStatus })
+      const affectedRows = typeof updateResult === 'object' ? updateResult.affectedRows : updateResult
+      if (updateResult?.sendStatus) sendStatus = updateResult.sendStatus
       if (affectedRows === 0) throw new Error('cloud gateway status target message was not found')
       if (payload.status === 'sent' && payload.channel === 'wecom_kf' && payload.accountId) {
         const repository = platformConnectionsRepository || (() => {
@@ -82,6 +90,7 @@ function initCloudGateway({ eventEmitter, accountEntries = [], options = {} } = 
         errorCode: payload.errorCode || null,
         errorMessage: payload.errorMessage || null
       })
+      if (['failed','unknown'].includes(sendStatus)) await (options.onAiDeliveryFailure || (id=>require('../conversation-pool/aiDeliveryFallback').runtime(eventEmitter).handle(id)))(payload.localMessageId || payload.commandId)
       if (envelope.eventId) link.send(createAck(envelope.eventId, 'processed', {
         localMessageId: payload.localMessageId,
         sendStatus
@@ -97,7 +106,7 @@ function initCloudGateway({ eventEmitter, accountEntries = [], options = {} } = 
       }
     }
   })
-  setDispatcher(dispatcher)
+  if (options.registerRuntime !== false) setDispatcher(dispatcher)
   if (options.enabled) link.start()
   return { link, inbound, dispatcher, accountMapper }
 }

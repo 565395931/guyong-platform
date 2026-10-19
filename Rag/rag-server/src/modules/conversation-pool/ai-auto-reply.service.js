@@ -7,14 +7,15 @@
  * 当会话处于 AI 自助池时，新消息到达后执行：
  *   1. 检查非文本内容 → 转待人工池
  *   2. 检查 AI 回复轮数（连续追问）→ 转待人工池
- *   3. RAG 检索置信度检查 → 低置信度转待人工池
- *   4. 客户情绪分析 → 负面情绪转待人工池
+ *   3. RAG 资料交给模型判断：正常回答、追问或结构化转人工
+ *   4. 结构化 reply / clarify 继续回复，handoff 才转待人工
  *   5. 以上都不满足 → 生成 AI 回复并发送
  *
  * 调用入口：渠道 Webhook / Cloud Gateway → messagingService → inboundMessage.service → AI Worker → 本服务
  */
 
 const crypto = require('crypto')
+const { isAiReplyEligible } = require('./aiReplyPolicy')
 const { sequelize } = require('../../config/database')
 const { isLatestAiReplyJob } = require('../../queues')
 const messagingService = require('../messaging/messaging.service')
@@ -178,13 +179,15 @@ function buildRetrievalDiagnostics({
     cautiousMin: Number(cautiousMin),
     mode: topScore < confidenceThreshold ? 'cautious' : 'normal',
     mergedMessageCount: mergedMessageCount || 1,
-    queryPreview: truncateText(queryText, 180),
-    retrieveQueryPreview: truncateText(retrieveQuery || queryText, 260),
-    topNodes: (contextDocs || []).slice(0, 3).map(node => ({
+    queryLength: String(queryText || '').length,
+    retrieveQueryLength: String(retrieveQuery || queryText || '').length,
+    queryHash: crypto.createHash('sha256').update(String(queryText || '')).digest('hex'),
+    retrieveQueryHash: crypto.createHash('sha256').update(String(retrieveQuery || queryText || '')).digest('hex'),
+    topNodes: (contextDocs || []).slice(0, 5).map(node => ({
       score: Number(node.score || 0),
       docName: truncateText(node.docName || '', 80),
       title: truncateText(node.title || '', 80),
-      textPreview: truncateText(node.text || node.content || '', 220)
+      textLength: String(node.text || node.content || '').length
     }))
   }
 }
@@ -201,7 +204,7 @@ function buildAiLogExtra(extra = {}) {
 /**
  * 桌面桥接账号（抖店本地客户端）——**必须按账号优先判定**。
  *
- * 与手动发送（routes/conversations.js）、审核发送（message-review）一致：
+ * 与手动发送（routes/conversations.js）一致：
  * 只看渠道会落到官方抖音适配器，它固定返回"开放平台未提供客服消息 API"，
  * AI 回复就永远发不出去（实测：审核通过的回复也发不出去，同一个坑）。
  */
@@ -249,13 +252,16 @@ async function getAiSelfReplyModel() {
  */
 async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, options = {}) {
   try {
+    if (await require('../../services/configService').getConfig('ai_model_service_enabled') === false) return {replied:false,transferredToHuman:false,skipped:true,reason:'model_service_disabled'};
     // 0. 幂等保护：任务真正执行时，会话必须仍处于 AI 自助池。
     // 连续消息场景下，前面的任务可能已触发转人工/流转，后续残留任务不能再回复。
     // 如果入队后又收到更新的客户消息，旧任务也不应回复。
-    const initialState = await getConversationAiState(conversationId, options.enqueuedAt, options.jobMarker)
+    const initialState = await getConversationAiState(conversationId, options.enqueuedAt, options.jobMarker, options.aiEpoch ?? 0)
     if (!initialState.canAiReply) {
       return { replied: false, transferredToHuman: false, skipped: true, reason: initialState.reason }
     }
+
+    options = { ...options, aiEpoch: initialState.aiEpoch }
 
     // 1. 获取池配置
     const config = await poolService.getPoolConfig()
@@ -269,13 +275,18 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
       const reason = messageType !== 'text'
         ? `客户发送${messageType}消息，AI无法处理`
         : '消息包含非文本内容，AI无法处理'
-      await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, earlyLanguage)
+      await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, earlyLanguage, { expectedEpoch: options.aiEpoch })
       return { replied: false, transferredToHuman: true, reason }
     }
 
     // 2.5 客户主动转人工关键词检测
     // 后台只配置中文关键词；matcher 会使用原文、中文译文和多语言语义兜底匹配。
     if (currentMessageText) {
+      if (require('../ai-provider/replyProtocol').explicitHumanRequest(currentMessageText)) {
+        const reason = '客户消息包含人工，客户主动请求转人工';
+        await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, detectCustomerLanguage(currentMessageText, message));
+        return { replied:false,transferredToHuman:true,reason,extra:buildAiLogExtra({transferTrigger:'customer_handoff_keyword',handoffKeyword:'人工'}) };
+      }
       const handoffMatch = await matchCustomerHandoffKeyword({
         messageText: currentMessageText,
         message,
@@ -284,7 +295,7 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
       if (handoffMatch.matched) {
         const reason = buildCustomerHandoffReason(handoffMatch)
         const customerLanguage = handoffMatch.customerLanguage || detectCustomerLanguage(currentMessageText, message)
-        await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage)
+        await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage, { expectedEpoch: options.aiEpoch })
         return {
           replied: false,
           transferredToHuman: true,
@@ -311,7 +322,7 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
       if (aiReplyCount >= maxRounds) {
         const earlyLanguage = detectCustomerLanguage(currentMessageText, message)
         const reason = `AI已回复${aiReplyCount}轮，客户仍在追问，判断需人工介入`
-        await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, earlyLanguage)
+        await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, earlyLanguage, { expectedEpoch: options.aiEpoch })
         return { replied: false, transferredToHuman: true, reason }
       }
     }
@@ -327,15 +338,8 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
     const customerLanguage = detectCustomerLanguage(messageText, message)
     const customerLang = customerLanguage.group
     console.log('[AiAutoReply] 客户语言:', customerLang, customerLanguage.code || '', customerLanguage.label || '', '文本长度:', messageText.length)
-    const sentimentEnabled = config.sentiment_check_enabled !== false
-    if (sentimentEnabled && messageText) {
-      const sentiment = await analyzeSentiment(messageText, config)
-      if (sentiment.isNegative) {
-        const reason = `客户情绪分析为负面(${sentiment.label})，需人工介入`
-        await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage)
-        return { replied: false, transferredToHuman: true, reason }
-      }
-    }
+    // 转人工统一由客户关键词和结构化 action 决定，避免独立情绪判断互相覆盖。
+
 
     // 5. 寒暄/打招呼检测（正则快速匹配 + LLM 兜底）
     //    这类消息不需要 RAG 知识库检索，AI 可以直接生成友好回复
@@ -347,54 +351,20 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
     if (isGreeting || isGreetingByLLM) {
       // 打招呼类消息，不需要 RAG，直接让 AI 生成友好回复
       console.log(`[AiAutoReply] 消息识别为寒暄/问候(${isGreeting ? '正则' : 'LLM'})，跳过RAG检索直接回复`)
-      // 寒暄专属提示词：绕过诚实原则，不需要参考资料即可友好回应+引导业务
-      const greetingPromptOverride = `你是对外客服代表，通过 WhatsApp 等渠道为客户提供咨询服务。
-
-客户发来了打招呼或寒暄消息。请友好回应，顺势引导到业务话题。
-
-回复规则：
-- 用客户使用的语言回复（客户发英文就用英文，发中文就用中文）
-- 简洁自然，像真人客服打字一样，1-2句话
-- 友好回应后，提一个与业务相关的跟进问题引导对话
-- 示例：客户说 Hello → "Hello! We specialize in nano ceramic glass coating for windows. How can I help you today?"
-- 示例：客户说 你好 → "你好！我们是做纳米陶瓷隔热涂层的，请问有什么可以帮到您？"
-- 不用过度寒暄，不用亲昵称呼
-- 只输出回复内容，不输出思考过程
-
-公司信息（可在引导时自然提及）：
-- 品牌：Lone Warrior / 孤勇者
-- 产品：nano ceramic glass coating / 纳米陶瓷玻璃隔热镀膜涂层
-- 核心功能：隔热、阻隔紫外线和红外线
-- 官网：thelonelybrave.com`
-
-      const replyText = await generateAiReplyFromContext(conversationId, messageText, [], customerLanguage, { systemPromptOverride: greetingPromptOverride })
+      let greetingDecision = null
+      const replyText = await generateAiReplyFromContext(conversationId, messageText, [], customerLanguage, { channel: message.channel, onDecision: value => { greetingDecision = value } })
+      if (greetingDecision?.action === 'handoff') {
+        const reason = `模型结构化决策要求转人工：${greetingDecision.reason}`
+        await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage, { expectedEpoch: options.aiEpoch })
+        return { replied:false,transferredToHuman:true,reason }
+      }
 
       if (!replyText) {
-        // AI 回复为空 → 返回 error 触发 Worker 重试
-        console.log('[AiAutoReply] 寒暄回复为空，将触发重试')
-        return { replied: false, transferredToHuman: false, error: '寒暄回复为空' }
-      }
-
-      const handoffReason = getReplyHumanHandoffReason(replyText)
-      if (handoffReason) {
-        const reason = `寒暄回复包含人工接管/无资料兜底话术（${handoffReason}），需人工介入`
-        await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage)
-        return { replied: false, transferredToHuman: true, reason }
-      }
-
-      // 6.5 回答有效性后置检查
-      const validationEnabled = config.ai_reply_validation_enabled !== false
-      if (validationEnabled) {
-        const isValid = await validateReplyQuality(conversationId, messageText, replyText)
-        if (!isValid) {
-          const reason = '寒暄回答有效性校验未通过，需人工介入'
-          await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage)
-          return { replied: false, transferredToHuman: true, reason }
-        }
+        return { replied: false, transferredToHuman: false, error: '模型回复失败、为空或JSON格式不正确，等待重试' }
       }
 
       // 7. 发送前再次校验池状态，防止生成过程中其他任务已触发转人工/流转后仍误发。
-      const sendState = await getConversationAiState(conversationId, options.enqueuedAt, options.jobMarker)
+      const sendState = await getConversationAiState(conversationId, options.enqueuedAt, options.jobMarker, options.aiEpoch ?? 0)
       if (!sendState.canAiReply) {
         return { replied: false, transferredToHuman: false, skipped: true, reason: sendState.reason }
       }
@@ -403,68 +373,16 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
       // 语言兜底检查：即使上游 ensureReplyLanguage 已控制，发送前再做一次安全网检查
       const { ensureOutputLanguage } = require('../../services/languageGuard')
       const guardedReplyText = await ensureOutputLanguage(replyText, conversationId, customerLanguage)
+    const finalState = await getConversationAiState(conversationId, options.enqueuedAt, options.jobMarker, options.aiEpoch ?? 0)
+    if (!finalState.canAiReply) return { replied: false, transferredToHuman: false, skipped: true, reason: finalState.reason }
 
-      const adapter = getWahaAdapter()
-      const dispatcher = getDispatcher()
-      const cloudPayload = {
-        conversationId,
-        localMessageId: crypto.randomUUID(),
-        channel: message.channel,
-        accountId: message.accountId,
-        targetUserId: message.channelUserId || message.userId,
-        messageType: 'text',
-        content: { text: guardedReplyText }
-      }
-      const bridgeAdapter = await getDesktopBridgeAdapter(message)
-      if (bridgeAdapter) {
-        const sendResult = await bridgeAdapter.sendMessage(
-          message.accountId,
-          message.channelUserId || message.userId,
-          { content: { text: guardedReplyText }, messageType: 'text', localMessageId: cloudPayload.localMessageId }
-        )
-        if (!sendResult.success) {
-          console.error('[AiAutoReply] 桌面桥接发送失败:', sendResult.error)
-          await messagingService.sendAiReply({ id: cloudPayload.localMessageId, conversationId, content: { text: guardedReplyText }, messageType: 'text', sendStatus: 'failed' }, eventEmitter)
-          return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
-        }
-      } else if (dispatcher) {
-        const sendResult = await dispatcher.dispatch(cloudPayload)
-        if (!sendResult.success) {
-          console.error('[AiAutoReply] 统一出站分发失败:', sendResult.error)
-          await messagingService.sendAiReply({ id: cloudPayload.localMessageId, conversationId, content: { text: guardedReplyText }, messageType: 'text', sendStatus: 'failed' }, eventEmitter)
-          return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
-        }
-      } else if (adapter && message.channel === 'whatsapp') {
-        const sendResult = await adapter.sendMessage(message.accountId, message.channelUserId || message.userId, { content: { text: guardedReplyText }, messageType: 'text' })
+      const delivery = await sendAiTextWithFallback({conversationId,message,text:guardedReplyText,eventEmitter,aiEpoch:options.aiEpoch})
+      return {replied:!delivery.skipped,transferredToHuman:Boolean(delivery.transferredToHuman),reply:guardedReplyText,...delivery,confidence:1,greeting:true}
 
-        if (!sendResult.success) {
-          console.error('[AiAutoReply] WAHA 发送失败:', sendResult.error)
-          await messagingService.sendAiReply({
-            id: cloudPayload.localMessageId,
-            conversationId,
-            content: { text: guardedReplyText },
-            messageType: 'text',
-            // 发送失败：如实记 failed，否则坐席看到假的绿勾（与手动发送对齐）
-            sendStatus: 'failed'
-          }, eventEmitter)
-          return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
-        }
-      }
-
-      // 8. 入库 AI 回复消息
-      await messagingService.sendAiReply({
-        id: cloudPayload.localMessageId,
-        conversationId,
-        content: { text: guardedReplyText },
-        messageType: 'text'
-      }, eventEmitter)
-
-      console.log(`[AiAutoReply] 寒暄消息已自动回复，长度 ${replyText.length}`)
-      return { replied: true, transferredToHuman: false, reply: replyText, confidence: 1.0, greeting: true }
     }
 
     // 非寒暄消息，走 RAG 检索流程（messageText 就是客户原文）
-    const retrieveResult = await retrieveWithContext(messageText, conversationId, mergedInput.retrievalText, message.channel, message.accountId)
+    const retrieveResult = await retrieveWithContext(messageText, conversationId, extractMessageRetrievalText(message) || extractMessageText(message), message.channel, message.accountId)
     const confidenceThreshold = config.ai_confidence_threshold || 0.7
     const cautiousMin = config.ai_confidence_cautious_min || 0.4
     const topScore = retrieveResult.maxScore || 0
@@ -478,49 +396,23 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
       cautiousMin
     })
 
-    // 三层置信度策略：
-    //   topScore >= threshold (≥0.7) → 正常回答（高置信度）
-    //   topScore >= cautiousMin 且 < threshold (0.4~0.7) → 谨慎回答（给出部分信息+承诺确认）
-    //   topScore < cautiousMin (<0.4) → 转人工（确实无相关信息）
-    if (topScore < cautiousMin) {
-      const reason = `RAG检索置信度极低(${topScore.toFixed(2)}<${cautiousMin})，无相关信息，需人工介入`
-      await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage)
-      return { replied: false, transferredToHuman: true, reason, extra: buildAiLogExtra({ retrieval: retrievalDiagnostics, transferTrigger: 'rag_low_confidence' }) }
-    }
-
-    // 谨慎回答模式追加指令：置信度不够高但有部分相关信息时，给出部分答案+承诺确认
-    const cautiousAppend = topScore < confidenceThreshold
-      ? `【谨慎回答模式】\n当前检索到的参考资料置信度不高（可能不是最精确匹配），但有一些相关信息。\n请按以下策略回复：\n- 给出你从参考资料中能确定的部分信息，尽量帮到客户\n- 对不确定的具体数字（价格、运费、规格等），说"我帮您确认一下具体数字"或类似表达，不要编造\n- 不要直接放弃整个回答，也不要只说"我不知道"或"请联系人工"\n- 回复结束后自然引导客户补充更多信息，便于后续精确回答`
-      : null
+    // Retrieval scores control caution; the validated reply protocol decides whether to clarify or hand off.
+    // Missing retrieval evidence alone is not a handoff decision: the model may ask for missing information.
 
     // 6. 生成 RAG 回复（messageText 就是原文，传 customerLang + native_only 确保用原语言回复）
-    const replyText = await generateAiReplyFromContext(conversationId, messageText, retrieveResult.contextDocs, customerLanguage, { systemPromptAppend: cautiousAppend })
+    let replyDecision = null
+    const replyText = await generateAiReplyFromContext(conversationId, messageText, retrieveResult.contextDocs, customerLanguage, { channel: message.channel, onDecision:value => { replyDecision = value } })
+    if (replyDecision?.action === 'handoff') {
+      const reason = `模型结构化决策要求转人工：${replyDecision.reason}`
+      await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage, { expectedEpoch: options.aiEpoch })
+      return { replied:false,transferredToHuman:true,reason,extra:buildAiLogExtra({retrieval:retrievalDiagnostics,transferTrigger:'model_json_handoff',handoffReason:replyDecision.reason}) }
+    }
     if (!replyText) {
-      // AI 回复为空 → 返回 error 触发 Worker 重试，重试耗尽后自动转人工
-      console.log('[AiAutoReply] AI 回复为空，将触发重试')
-      return { replied: false, transferredToHuman: false, error: 'AI回复为空，RAG生成未返回有效内容', extra: buildAiLogExtra({ retrieval: retrievalDiagnostics }) }
-    }
-
-    const handoffReason = getReplyHumanHandoffReason(replyText)
-    if (handoffReason) {
-      const reason = `AI回复包含人工接管/无资料兜底话术（${handoffReason}），需人工介入`
-      await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage)
-      return { replied: false, transferredToHuman: true, reason, extra: buildAiLogExtra({ retrieval: retrievalDiagnostics, handoffReason, transferTrigger: 'reply_handoff_phrase' }) }
-    }
-
-    // 6.5 回答有效性后置检查 — 用轻量模型二次判断"回复是否真的回答了问题"
-    const validationEnabled = config.ai_reply_validation_enabled !== false
-    if (validationEnabled) {
-      const isValid = await validateReplyQuality(conversationId, messageText, replyText)
-      if (!isValid) {
-        const reason = 'AI回答有效性校验未通过（回复未真正回答客户问题），需人工介入'
-        await poolService.aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage)
-        return { replied: false, transferredToHuman: true, reason, extra: buildAiLogExtra({ retrieval: retrievalDiagnostics, transferTrigger: 'reply_validation_failed' }) }
-      }
+      return { replied: false, transferredToHuman: false, error: '模型回复失败、为空或JSON格式不正确，等待重试', extra: buildAiLogExtra({ retrieval: retrievalDiagnostics, transferTrigger: 'invalid_model_response' }) }
     }
 
     // 7. 发送前再次校验池状态，防止生成过程中其他任务已触发转人工/流转后仍误发。
-    const sendState = await getConversationAiState(conversationId, options.enqueuedAt, options.jobMarker)
+    const sendState = await getConversationAiState(conversationId, options.enqueuedAt, options.jobMarker, options.aiEpoch ?? 0)
     if (!sendState.canAiReply) {
       return { replied: false, transferredToHuman: false, skipped: true, reason: sendState.reason }
     }
@@ -529,65 +421,12 @@ async function handleAiSelfPoolMessage(conversationId, message, eventEmitter, op
     // 语言兜底检查：即使上游 ensureReplyLanguage 已控制，发送前再做一次安全网检查
     const { ensureOutputLanguage } = require('../../services/languageGuard')
     const guardedReplyText = await ensureOutputLanguage(replyText, conversationId, customerLanguage)
+    const finalState = await getConversationAiState(conversationId, options.enqueuedAt, options.jobMarker, options.aiEpoch ?? 0)
+    if (!finalState.canAiReply) return { replied: false, transferredToHuman: false, skipped: true, reason: finalState.reason }
 
-    const adapter = getWahaAdapter()
-    const dispatcher = getDispatcher()
-    const cloudPayload = {
-      conversationId,
-      localMessageId: crypto.randomUUID(),
-      channel: message.channel,
-      accountId: message.accountId,
-      targetUserId: message.channelUserId || message.userId,
-      messageType: 'text',
-      content: { text: guardedReplyText }
-    }
-    const bridgeAdapter = await getDesktopBridgeAdapter(message)
-    if (bridgeAdapter) {
-      const sendResult = await bridgeAdapter.sendMessage(
-        message.accountId,
-        message.channelUserId || message.userId,
-        { content: { text: guardedReplyText }, messageType: 'text', localMessageId: cloudPayload.localMessageId }
-      )
-      if (!sendResult.success) {
-        console.error('[AiAutoReply] 桌面桥接发送失败:', sendResult.error)
-        await messagingService.sendAiReply({ id: cloudPayload.localMessageId, conversationId, content: { text: guardedReplyText }, messageType: 'text', sendStatus: 'failed' }, eventEmitter)
-        return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
-      }
-    } else if (dispatcher) {
-      const sendResult = await dispatcher.dispatch(cloudPayload)
-      if (!sendResult.success) {
-        console.error('[AiAutoReply] 统一出站分发失败:', sendResult.error)
-        await messagingService.sendAiReply({ id: cloudPayload.localMessageId, conversationId, content: { text: guardedReplyText }, messageType: 'text', sendStatus: 'failed' }, eventEmitter)
-        return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
-      }
-    } else if (adapter && message.channel === 'whatsapp') {
-      const sendResult = await adapter.sendMessage(message.accountId, message.channelUserId || message.userId, { content: { text: guardedReplyText }, messageType: 'text' })
+    const delivery = await sendAiTextWithFallback({conversationId,message,text:guardedReplyText,eventEmitter,aiEpoch:options.aiEpoch})
+    return {replied:!delivery.skipped,transferredToHuman:Boolean(delivery.transferredToHuman),reply:guardedReplyText,...delivery,confidence:topScore,extra:buildAiLogExtra({retrieval:retrievalDiagnostics})}
 
-      if (!sendResult.success) {
-        console.error('[AiAutoReply] WAHA 发送失败:', sendResult.error)
-        await messagingService.sendAiReply({
-          id: cloudPayload.localMessageId,
-          conversationId,
-          content: { text: guardedReplyText },
-          messageType: 'text',
-          // 发送失败：如实记 failed，否则坐席看到假的绿勾（与手动发送对齐）
-          sendStatus: 'failed'
-        }, eventEmitter)
-        return { replied: true, transferredToHuman: false, reply: guardedReplyText, sendError: sendResult.error }
-      }
-    }
-
-    // 8. 入库 AI 回复消息（更新 last_reply_by = 'ai'）
-    await messagingService.sendAiReply({
-      id: cloudPayload.localMessageId,
-      conversationId,
-      content: { text: guardedReplyText },
-      messageType: 'text'
-    }, eventEmitter)
-
-    console.log(`[AiAutoReply] AI 已自动回复会话 ${conversationId}，回复长度 ${guardedReplyText.length}，置信度 ${topScore.toFixed(2)}`)
-
-    return { replied: true, transferredToHuman: false, reply: guardedReplyText, confidence: topScore, extra: buildAiLogExtra({ retrieval: retrievalDiagnostics }) }
   } catch (err) {
     console.error('[AiAutoReply] 处理失败:', err.message)
     return { replied: false, transferredToHuman: false, error: err.message }
@@ -622,42 +461,15 @@ async function retrieveWithContext(queryText, conversationId = null, retrievalTe
   if (!queryText) return { contextDocs: [], maxScore: 0, retrieveQuery: '' }
 
   try {
-    const baseRetrieveText = retrievalText || queryText
-    let retrieveQuery = baseRetrieveText
-    if (conversationId) {
-      const configService = require('../../services/configService')
-      const rawRagContextCount = await configService.getConfig('rag_context_message_count')
-      const ragContextCount = Math.max(0, Math.min(parseInt(rawRagContextCount, 10) || 0, 10))
-      const historyLimit = ragContextCount > 0 ? ragContextCount : 3
-      const recentCustomerMsgs = await getRecentCustomerRetrievalTexts(conversationId, historyLimit)
-
-      if (ragContextCount === 0) {
-        const shortOrAmbiguous = queryText.length < 30 || /\b(it|this|that|the other|the (first|second|small|big) one|another)\b/i.test(queryText)
-        if (shortOrAmbiguous && recentCustomerMsgs.length > 0) {
-          const recentUserMsgs = recentCustomerMsgs.slice(-3)
-          recentUserMsgs.push(baseRetrieveText)
-          retrieveQuery = recentUserMsgs.join(' ')
-          console.log('[AiAutoReply] 智能检测：短/代词消息，使用增强检索 query，长度:', retrieveQuery.length)
-        }
-      } else if (recentCustomerMsgs.length > 0) {
-        const recentUserMsgs = recentCustomerMsgs.slice(-ragContextCount)
-        recentUserMsgs.push(baseRetrieveText)
-        retrieveQuery = recentUserMsgs.join(' ')
-        console.log('[AiAutoReply] 固定拼接模式：拼接', ragContextCount, '条客户消息，检索 query长度:', retrieveQuery.length)
-      }
-    }
-
-    const ragSvc = getRagService()
-    const knowledgeMetadata = await getAccountKnowledgeMetadata(accountId)
-    const retrieveResult = await ragSvc.retrieve({
+    // The configured Bailian index is the knowledge boundary for this local service.
+    // Chat history is supplied to the answer model, never to knowledge retrieval.
+    const retrieveQuery = require('../ai-provider/replyContext').buildKnowledgeQuery(retrievalText || queryText)
+    const retrieveResult = await getRagService().retrieve({
       query: retrieveQuery,
       denseSimilarityTopK: 5,
       sparseSimilarityTopK: 5,
       enableReranking: true,
-      rerankTopN: 5,
-      channel,
-      knowledgeScope: knowledgeMetadata.knowledgeScope,
-      knowledgeChannels: knowledgeMetadata.knowledgeChannels
+      rerankTopN: 5
     })
 
     const contextDocs = retrieveResult.nodes || []
@@ -690,10 +502,10 @@ async function generateAiReplyFromContext(conversationId, queryText, contextDocs
 
     // 1. 获取会话上下文
     const configService = require('../../services/configService')
-    const rawLlmContextCount = await configService.getConfig('llm_context_message_count')
+    const rawLlmContextCount = (await require('../ai-provider/providerService').getProviderService().getReplySettings()).contextMessageCount
     const parsedLlmContextCount = parseInt(rawLlmContextCount, 10)
     const llmContextCount = Number.isFinite(parsedLlmContextCount)
-      ? Math.max(0, Math.min(parsedLlmContextCount, 50))
+      ? Math.max(0, Math.min(parsedLlmContextCount, 100))
       : 20
     const history = await messagingService.getConversationContext(conversationId, llmContextCount)
 
@@ -713,6 +525,10 @@ async function generateAiReplyFromContext(conversationId, queryText, contextDocs
         customerLangCode: langInfo.code,
         customerLangLabel: langInfo.label,
         langMode: 'native_only',
+        trackReplyHealth: true,
+        structuredReply: true,
+        channel: extraOptions.channel,
+        historyIncludesCurrent: true,
         systemPromptOverride,
         systemPromptAppend
       }
@@ -720,6 +536,8 @@ async function generateAiReplyFromContext(conversationId, queryText, contextDocs
 
     let fullResponse = ''
     for await (const chunk of generator) {
+      if (chunk.type === 'decision') extraOptions.onDecision?.(chunk)
+      if (chunk.type === 'error') throw new Error('客服模型生成失败')
       if (chunk.type === 'text') {
         fullResponse += chunk.content
       }
@@ -739,97 +557,6 @@ async function generateAiReplyFromContext(conversationId, queryText, contextDocs
   } catch (err) {
     console.error('[AiAutoReply] 生成回复失败:', err.message)
     return ''
-  }
-}
-
-/**
- * 回答有效性后置检查
- *
- * 在 AI 生成回复后，用轻量模型二次判断"回复是否真的回答了客户的问题"。
- * 防止 LLM 在知识库无答案时依然生成敷衍/无关内容。
- *
- * @param {string} conversationId
- * @param {string} queryText 客户原始问题
- * @param {string} replyText AI 生成的回复
- * @returns {Promise<boolean>} true=回答有效，false=应转人工
- */
-async function validateReplyQuality(conversationId, queryText, replyText) {
-  try {
-    const { hasInternalReplyMarker } = require('../../services/languageGuard')
-    if (hasInternalReplyMarker(replyText)) {
-      console.warn('[AiAutoReply] 回答有效性校验未通过：回复包含内部来源标记')
-      return false
-    }
-    const handoffReason = getReplyHumanHandoffReason(replyText)
-    if (handoffReason) {
-      console.warn(`[AiAutoReply] 回答有效性校验未通过：${handoffReason}`)
-      return false
-    }
-
-    const langchainSvc = getLangchainService()
-    const configService = require('../../services/configService')
-    // 使用低成本模型做检验
-    const model = await configService.getConfig('ai_reply_validation_model') || 'deepseek-v4-flash'
-
-    const systemPrompt = `你是一个质检员，负责判断 AI 客服的回复是否恰当。
-
-你必须做语义判断，不要只按固定关键词判断。客户和候选回复可能使用中文、英文、西班牙语、阿拉伯语、法语、德语、葡萄牙语、俄语、印地语等任何语言。
-
-判断标准：
-- "YES"：回复与客户消息匹配且恰当。包括以下场景都算通过：
-  - 客户打招呼/寒暄（hello/hi/你好），AI 回复了友好的问候并引导到业务话题
-  - 客户询问产品信息，AI 给出了相关产品描述（即使只给了部分信息+承诺确认具体数字）
-  - 客户问价格，AI 给出了报价（或给出参考信息+承诺确认具体价格）
-  - 客户表达需求，AI 做了合理的引导或推荐
-  - 回复给出了部分答案+说"帮您确认一下具体细节"——这是谨慎回答策略，算通过
-  - 回复直接回答了客户的问题，或礼貌地引导客户提供更多信息
-- "NO"：仅在以下情况判定：
-  - 回复完全是答非所问（客户问价格，AI 聊天气）
-  - 回复编造了不存在的产品/价格信息（给出了具体数字但参考资料中没有）
-  - 回复明显敷衍且没有任何实质内容或引导（仅"请稍等"没有任何后续信息或引导）
-  - 回复承认没有资料、手册未找到、知识库未覆盖，或无法回答客户问题
-  - 回复说"稍后回复/很快回复/让同事回复/人工会联系/客服稍后跟进"等需要真人实际接手的话术
-  - 无论使用哪种语言，只要语义是在说"我不知道/没有资料/资料不足/无法确认/稍后答复/同事或人工会回复/团队会联系/客服会跟进"，都判定为 NO
-  - 回复包含有害或不当内容
-  - 回复是纯粹的道歉/拒绝而没有提供任何帮助或引导（如"I'm sorry, we currently don't..."而没有后续）
-  - 回复包含内部来源标记或系统标签（如"[AI回复]"、"[人工回复]"、"AI reply:" 等），这些内容不能发给客户
-
-注意：
-- 寒暄类回复（如"你好！很高兴为您服务，请问有什么可以帮您？"）应该判定为 YES
-- 谨慎回答类回复（如给出大致信息+承诺确认具体数字）应该判定为 YES，因为这是合理的部分回答策略
-- 只有完全拒绝帮助且没有引导的回复才判定为 NO
-- 如果回复把任务交给同事、人工、客服或承诺后续联系/稍后答复，必须判定为 NO，因为系统会在 NO 后自动转人工池
-- 如果回复中有部分答案，但同时对某个客户明确提出的子问题承认无资料、无法回答，或承诺让人后续回复，也必须判定为 NO
-- 任何包含内部来源标记的候选回复，无论正文是否回答问题，都必须判定为 NO
-
-只回复一个单词：YES 或 NO，不要添加任何其他内容。`
-
-    const userMessage = `客户问题：${queryText}\n\n候选回复：${replyText}\n\n请判断以上候选回复是否真正回答了客户问题，且是否适合直接发给客户。`
-
-    const generator = langchainSvc.generateRecommendationStream(
-      userMessage,
-      [],
-      [],
-      { model, temperature: 0.1, maxContextTokens: 800, systemPromptOverride: systemPrompt }
-    )
-
-    let fullResponse = ''
-    for await (const chunk of generator) {
-      if (chunk.type === 'text') {
-        fullResponse += chunk.content
-      }
-    }
-
-    // 解析结果
-    const trimmed = fullResponse.trim().toUpperCase()
-    const isValid = trimmed.includes('YES') && !trimmed.includes('NO')
-
-    console.log(`[AiAutoReply] 回答有效性校验: ${isValid ? '通过' : '未通过'} (模型输出长度: ${trimmed.length})`)
-    return isValid
-  } catch (err) {
-    console.error('[AiAutoReply] 回答有效性校验异常，放过:', err.message)
-    // 校验失败时放行，避免因校验服务异常影响回复
-    return true
   }
 }
 
@@ -900,10 +627,11 @@ async function analyzeSentiment(messageText, config) {
  * 也不应判定为"非文本"——AI 可以处理带 emoji 的纯文本对话。
  * 只有当 text 为空且存在真正的媒体内容时才返回 true。
  */
-async function getConversationAiState(conversationId, enqueuedAt = null, jobMarker = null) {
+async function getConversationAiState(conversationId, enqueuedAt = null, jobMarker = null, expectedEpoch = null) {
   try {
+    if (await require('../../services/configService').getConfig('ai_model_service_enabled') === false) return {canAiReply:false,reason:'model_service_disabled'};
     const [rows] = await sequelize.query(
-      `SELECT pool_type, conv_status FROM conversations WHERE id = :conversationId LIMIT 1`,
+      `SELECT pool_type, conv_status, conversations.status, conversations.ai_epoch, conversations.claimed_by, a.adapter_type FROM conversations LEFT JOIN channel_accounts a ON a.id = conversations.account_id WHERE conversations.id = :conversationId LIMIT 1`,
       { replacements: { conversationId } }
     )
 
@@ -912,7 +640,8 @@ async function getConversationAiState(conversationId, enqueuedAt = null, jobMark
     }
 
     const conv = rows[0]
-    if (conv.pool_type !== POOL_TYPE.AI_SELF || conv.conv_status !== CONV_STATUS.AI_SERVING) {
+    if (expectedEpoch != null && Number(conv.ai_epoch || 0) !== Number(expectedEpoch)) return { canAiReply:false,reason:'人工接管后旧AI任务已作废' }
+    if (!isAiReplyEligible(conv)) {
       return {
         canAiReply: false,
         reason: `会话当前为 ${conv.pool_type}/${conv.conv_status}，不是 ${POOL_TYPE.AI_SELF}/${CONV_STATUS.AI_SERVING}`
@@ -942,7 +671,7 @@ async function getConversationAiState(conversationId, enqueuedAt = null, jobMark
       }
     }
 
-    return { canAiReply: true }
+    return { canAiReply: true, aiEpoch: Number(conv.ai_epoch || 0) }
   } catch (err) {
     console.error('[AiAutoReply] 查询会话AI状态失败:', err.message)
     // 状态不明时保守跳过，避免误发客户消息。
@@ -1476,6 +1205,17 @@ module.exports = {
   generateAiReply,
   retrieveWithContext,
   analyzeSentiment,
-  validateReplyQuality,
   getReplyHumanHandoffReason
+}
+
+async function sendAiTextWithFallback({conversationId,message,text,eventEmitter,aiEpoch}) {
+  const bridge = await getDesktopBridgeAdapter(message)
+  const dispatcher = getDispatcher(), adapter = getWahaAdapter()
+  const dispatch = async payload => {
+    if (bridge) return bridge.sendMessage(message.accountId,payload.targetUserId,{content:payload.content,messageType:payload.messageType,localMessageId:payload.localMessageId})
+    if (dispatcher) return dispatcher.dispatch(payload)
+    if (adapter && message.channel === 'whatsapp') return adapter.sendMessage(message.accountId,payload.targetUserId,{content:payload.content,messageType:payload.messageType})
+    return {success:false,status:'failed',error:'发送通道未就绪'}
+  }
+  return require('./aiDeliveryFallback').runtime(eventEmitter).sendText({conversationId,localMessageId:crypto.randomUUID(),channel:message.channel,accountId:message.accountId,targetUserId:message.channelUserId||message.userId,messageType:'text',aiEpoch,content:{text}},dispatch)
 }

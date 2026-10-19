@@ -65,10 +65,10 @@ export function claimConversation(id, data = {}) {
 }
 
 /**
- * 获取可分配坐席（admin/supervisor）
+ * 获取可分配坐席（admin）
  */
-export function getAssignableSeats() {
-  return request.get('/v1/conversations/assignable-seats')
+export function getAssignableSeats(params = {}) {
+  return request.get('/v1/conversations/assignable-seats', { params })
 }
 
 /**
@@ -113,7 +113,7 @@ export function transferToAi(id) {
 }
 
 /**
- * 转交会话（supervisor/admin）
+ * 转交会话（admin）
  * @param {string} id - 会话 ID
  * @param {number} toSeatId - 目标坐席 ID
  */
@@ -138,7 +138,7 @@ export function getSeatLoad() {
 }
 
 /**
- * 查询池操作日志（supervisor/admin）
+ * 查询池操作日志（admin）
  */
 export function getPoolLogs(params = {}) {
   return request.get('/v1/conversations/pool-logs', { params })

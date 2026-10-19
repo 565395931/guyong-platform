@@ -12,11 +12,11 @@ const {
 
 test('enforces connection and account-policy roles', () => {
   assert.equal(canViewConnections({ role: 'agent' }), false)
-  assert.equal(canViewConnections({ role: 'supervisor' }), true)
+  assert.equal(canViewConnections({ role: 'supervisor' }), false)
   assert.equal(canManageConnections({ role: 'supervisor' }), false)
   assert.equal(canManageConnections({ role: 'admin' }), true)
-  assert.equal(canManageAccountPolicy({ role: 'supervisor' }), true)
-  assert.equal(canManageAllowlist({ role: 'supervisor' }), true)
+  assert.equal(canManageAccountPolicy({ role: 'supervisor' }), false)
+  assert.equal(canManageAllowlist({ role: 'supervisor' }), false)
   assert.equal(canManageAllowlist({ role: 'agent' }), false)
 })
 

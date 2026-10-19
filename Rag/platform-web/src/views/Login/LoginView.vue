@@ -21,8 +21,8 @@
 
       <template v-else>
         <el-alert class="login-view__notice" type="info" :closable="false" show-icon>
-          <template #title>{{ isSetup ? '仅首次设置' : '本机账号登录' }}</template>
-          <template #default>{{ isSetup ? '创建成功后初始化入口会自动关闭。请保存好账号密码。' : '本系统不开放公开注册，请使用本机管理员账号登录。' }}</template>
+          <template #title>{{ isSetup ? '仅首次设置' : '工作台账号登录' }}</template>
+          <template #default>{{ isSetup ? '创建成功后初始化入口会自动关闭。请保存好账号密码。' : '请使用管理员创建的客服账号或 Admin 账号登录。' }}</template>
         </el-alert>
 
         <div v-if="formError" class="login-view__error" role="alert">{{ formError }}</div>
@@ -48,7 +48,7 @@
           <el-button link type="primary" @click="openDesktopSettings">连接设置</el-button>
           <span :title="runtimeConfig.serverUrl">{{ runtimeConfig.serverUrl || '开发代理' }}</span>
         </div>
-        <span>© 2026 客服聚合工作台 · 数据保存在本机</span>
+        <span>© 2026 客服聚合工作台 · 连接团队工作台</span>
       </footer>
     </section>
   </main>
@@ -88,7 +88,11 @@ const rules = {
   ],
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
-    { min: 8, max: 72, message: '密码长度须为 8-72 个字符', trigger: 'blur' }
+    { validator: (_rule, value, callback) => {
+      const min = isSetup.value ? 8 : 6
+      callback(String(value || '').length >= min && String(value || '').length <= 72
+        ? undefined : new Error(`密码长度须为 ${min}-72 个字符`))
+    }, trigger: 'blur' }
   ],
   confirmPassword: [{ validator: validateConfirmation, trigger: ['blur', 'change'] }]
 }

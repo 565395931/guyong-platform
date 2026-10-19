@@ -39,7 +39,7 @@ export function useQuickReply(id) {
   return request.post(`/v1/quick-replies/${id}/use`)
 }
 
-// 快捷话术的增删改（后端只允许 admin / 主管，坐席调用会 403）
+// 快捷话术的增删改（公共库由 Admin 维护，个人话术修改按登录账号隔离）
 export function createQuickReply(data) {
   return request.post('/v1/quick-replies', data)
 }

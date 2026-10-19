@@ -79,8 +79,7 @@
             <el-empty v-else description="未选择会话" :image-size="60" />
           </el-tab-pane>
           <el-tab-pane label="快捷话术" name="quick">
-            <QuickReplyPanel v-if="conversationStore.current" :conversation="conversationStore.current" />
-            <el-empty v-else description="未选择会话" :image-size="60" />
+            <QuickReplyPanel :conversation="conversationStore.current" />
           </el-tab-pane>
           <!-- 文件选择已迁移到输入框下方 -->
         </el-tabs>
@@ -99,7 +98,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch, onMounted } from 'vue'
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   ChatDotRound,
@@ -112,12 +111,11 @@ import { useConversationStore } from '@/stores/conversation'
 import { useSettingsStore } from '@/stores/settings'
 import { useUserStore } from '@/stores/user'
 import { websocketService } from '@/api/websocket'
-import { updateSeatStatus } from '@/api/conversations'
 import ConversationList from '@/components/Conversation/ConversationList.vue'
 import ChatWindow from '@/components/Chat/ChatWindow.vue'
 import UserInfoCard from '@/components/Panel/UserInfoCard.vue'
 import QuickReplyPanel from '@/components/Panel/QuickReplyPanel.vue'
-import { resolveChannelScope } from '@/modules/conversations/channelScope'
+import { resolveChannelScope, conversationMatchesScope } from '@/modules/conversations/channelScope'
 
 const route = useRoute()
 const props = defineProps({
@@ -131,11 +129,27 @@ const conversationStore = useConversationStore()
 const settingsStore = useSettingsStore()
 const userStore = useUserStore()
 const activeTab = ref('info')
+onBeforeUnmount(() => {
+  if (conversationStore.current?.id) websocketService.leaveConversation(conversationStore.current.id)
+  conversationStore.clearCurrent()
+})
 const channelScope = computed(() => resolveChannelScope({
   prop: props.channelCode,
   query: route.query.channel,
   meta: route.meta.fixedChannel || route.meta.channelCode
 }))
+
+// Global selection never crosses a channel/account workspace boundary.
+watch(
+  () => [props.channelCode || route.query.channel || route.meta.fixedChannel || route.meta.channelCode || '', String(props.accountId || '')],
+  (scope, previous) => {
+    if ((previous && scope.some((value, index) => value !== previous[index])) ||
+        !conversationMatchesScope(conversationStore.current, { channel: channelScope.value.fixedChannel, accountId: props.accountId })) {
+      conversationStore.clearCurrent()
+    }
+  },
+  { immediate: true, flush: 'sync' }
+)
 
 // 头像更新回调 — 同步到 store 和列表
 const onAvatarUpdated = ({ id, avatar }) => {
@@ -163,7 +177,6 @@ watch(
 // 组件挂载时设置坐席在线状态
 onMounted(async () => {
   try {
-    await updateSeatStatus('online')
     await conversationStore.fetchPoolStats()
     await conversationStore.fetchSeatLoad()
   } catch (err) {

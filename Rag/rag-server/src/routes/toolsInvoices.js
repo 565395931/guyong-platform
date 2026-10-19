@@ -9,7 +9,7 @@ const {
 } = require('../services/invoiceService')
 
 const router = express.Router()
-const EFFECTIVE_JWT_SECRET = process.env.JWT_SECRET || 'rag_secret_key_2024_dev_only'
+const EFFECTIVE_JWT_SECRET = process.env.JWT_SECRET
 
 router.use((req, res, next) => {
   const token = req.headers.authorization?.replace('Bearer ', '')
@@ -18,7 +18,7 @@ router.use((req, res, next) => {
   }
   try {
     const decoded = jwt.verify(token, EFFECTIVE_JWT_SECRET)
-    if (!['agent', 'supervisor', 'admin'].includes(decoded.role)) {
+    if (!['agent', 'admin'].includes(decoded.role)) {
       return res.status(403).json({ success: false, message: '无权使用发票工具' })
     }
     req.user = decoded

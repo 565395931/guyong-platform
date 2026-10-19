@@ -4,7 +4,7 @@
       <div>
         <span class="page-kicker">ACCESS CONTROL</span>
         <h1>系统账号管理</h1>
-        <p>管理后台登录账号、岗位权限和启用状态</p>
+        <p>管理 Admin 与普通客服账号；在各平台页面配置允许接待的客服</p>
       </div>
       <el-button type="primary" :icon="Plus" @click="openCreate">新增账号</el-button>
     </header>
@@ -55,6 +55,17 @@
               {{ statusLabel(row.status) }}
             </el-tag>
           </template>
+        </el-table-column>
+        <el-table-column label="接待状态" width="110">
+          <template #default="{ row }">
+            <el-tag v-if="row.role === 'agent'" :type="row.seatStatus === 'online' ? 'success' : row.seatStatus === 'busy' ? 'warning' : 'info'" effect="plain">
+              {{ ({ online: '在线', busy: '忙碌', offline: '离线' })[row.seatStatus] || '离线' }}
+            </el-tag>
+            <span v-else>—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="今日接待" width="100">
+          <template #default="{ row }">{{ row.role === 'agent' ? `${row.currentLoad || 0} 人` : '—' }}</template>
         </el-table-column>
         <el-table-column prop="createdAt" label="创建时间" width="180">
           <template #default="{ row }">{{ formatDate(row.createdAt) }}</template>
@@ -190,7 +201,6 @@ import { buildAccountOverview } from '@/modules/systemAccounts/accountOverview'
 
 const roleOptions = [
   { value: 'admin', label: '管理员' },
-  { value: 'supervisor', label: '主管' },
   { value: 'agent', label: '坐席' }
 ]
 const statusOptions = [
@@ -236,7 +246,7 @@ function roleLabel(role) {
 }
 
 function roleTagType(role) {
-  return role === 'admin' ? 'danger' : role === 'supervisor' ? 'warning' : 'primary'
+  return role === 'admin' ? 'danger' : 'primary'
 }
 
 function statusLabel(status) {

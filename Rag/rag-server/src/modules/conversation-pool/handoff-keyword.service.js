@@ -165,7 +165,6 @@ async function matchBySemanticIntent({
 
   try {
     const model = config.ai_transfer_keyword_match_model ||
-      config.ai_reply_validation_model ||
       config.ai_self_reply_model ||
       // 运行时取「默认模型」：配置页改了立即生效（原来是模块加载时读死的 env）
       await require('../../services/aiSettings').getChatModel()
@@ -189,7 +188,7 @@ async function matchBySemanticIntent({
       translatedText ? `已有中文译文：${translatedText}` : ''
     ].filter(Boolean).join('\n')
 
-    const chatModel = getLangchainService().createChatModel({
+    const chatModel = await getLangchainService().createChatModel({
       model,
       temperature: 0,
       maxTokens: 200,

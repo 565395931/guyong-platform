@@ -4,7 +4,7 @@ const statisticsService = require('../modules/statistics/statistics.service')
 
 const router = express.Router()
 const JWT_SECRET = process.env.JWT_SECRET
-const EFFECTIVE_JWT_SECRET = JWT_SECRET || 'rag_secret_key_2024_dev_only'
+const EFFECTIVE_JWT_SECRET = JWT_SECRET
 
 router.use((req, res, next) => {
   const token = req.headers.authorization?.replace('Bearer ', '')
@@ -13,7 +13,7 @@ router.use((req, res, next) => {
   }
   try {
     const decoded = jwt.verify(token, EFFECTIVE_JWT_SECRET)
-    if (!['agent', 'supervisor', 'admin'].includes(decoded.role)) {
+    if (!['agent', 'admin'].includes(decoded.role)) {
       return res.status(403).json({ success: false, message: '无权访问统计数据' })
     }
     req.user = decoded

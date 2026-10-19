@@ -8,16 +8,10 @@ function createDependencies(poolType) {
   return {
     calls,
     dependencies: {
-      reviewService: {
-        reviewInbound: async (...args) => {
-          calls.push(['review', ...args])
-          return { action: 'allow' }
-        }
-      },
       poolService: {
         routeIncomingMessage: async (...args) => {
           calls.push(['route', ...args])
-          return { poolType }
+          return { poolType, convStatus: poolType === 'ai_self' ? 'ai_serving' : 'pending_claim', claimedBy: null }
         }
       },
       configService: {
@@ -43,6 +37,15 @@ function createDependencies(poolType) {
   }
 }
 
+test('manual-only shop connection cancels pending AI jobs even when routed to AI pool', async () => {
+  const { calls, dependencies } = createDependencies('ai_self')
+  const processAfterStore = createInboundMessagePostProcessor(dependencies)
+  const result = await processAfterStore({ conversationId: 'shop-conversation' }, null, { allowAutoReply: false })
+  assert.equal(result.manualOnly, true)
+  assert.equal(result.aiReplyQueued, false)
+  assert.deepEqual(calls.map(call => call[0]), ['route', 'remove'])
+})
+
 test('AI 自助池入站消息通过公共服务加入 AI 回复队列', async () => {
   const { calls, dependencies } = createDependencies('ai_self')
   const processAfterStore = createInboundMessagePostProcessor(dependencies)
@@ -63,7 +66,7 @@ test('AI 自助池入站消息通过公共服务加入 AI 回复队列', async (
 
   assert.equal(result.aiReplyQueued, true)
   assert.equal(result.jobId, 'job-1')
-  assert.deepEqual(calls.map(call => call[0]), ['review', 'route', 'remove', 'config', 'mark', 'add', 'log'])
+  assert.deepEqual(calls.map(call => call[0]), ['route', 'remove', 'config', 'mark', 'add', 'log'])
   const addCall = calls.find(call => call[0] === 'add')
   assert.equal(addCall[2].conversationId, 'conversation-1')
   assert.equal(addCall[2].eventId, 'event-1')
@@ -78,7 +81,7 @@ test('AI 自助池入站消息通过公共服务加入 AI 回复队列', async (
 })
 
 test('非 AI 自助池入站消息只执行路由，不创建 AI 任务', async () => {
-  const { calls, dependencies } = createDependencies('pending_human')
+  const { calls, dependencies } = createDependencies('private')
   const processAfterStore = createInboundMessagePostProcessor(dependencies)
 
   const result = await processAfterStore({ conversationId: 'conversation-2' }, null, {
@@ -87,39 +90,16 @@ test('非 AI 自助池入站消息只执行路由，不创建 AI 任务', async 
   })
 
   assert.equal(result.aiReplyQueued, false)
-  assert.deepEqual(calls.map(call => call[0]), ['review', 'route'])
+  assert.deepEqual(calls.map(call => call[0]), ['route'])
 })
 
-test('待人工审核消息不会进入会话路由或 AI 回复队列', async () => {
-  const { calls, dependencies } = createDependencies('ai_self')
-  dependencies.reviewService.reviewInbound = async (...args) => {
-    calls.push(['review', ...args])
-    return { action: 'review', item: { id: 'review-1' } }
-  }
-  const processAfterStore = createInboundMessagePostProcessor(dependencies)
 
-  const result = await processAfterStore({
-    id: 'message-3',
-    conversationId: 'conversation-3',
-    content: { text: 'suspicious' }
-  }, null, { source: 'cloud_gateway', eventId: 'event-3' })
-
-  assert.deepEqual(result, {
-    reviewQueued: true,
-    reviewId: 'review-1',
-    aiReplyQueued: false,
-    jobMarker: null
-  })
-  assert.deepEqual(calls.map(call => call[0]), ['review', 'remove'])
+test('待人工会话不再加入AI队列', async () => {
+  const { dependencies } = createDependencies('pending_human')
+  assert.equal((await createInboundMessagePostProcessor(dependencies)({ conversationId: 'pending' })).aiReplyQueued, false)
 })
-
-test('审核任务已创建时，清理旧 AI 任务失败也不会继续路由', async () => {
-  const { calls, dependencies } = createDependencies('ai_self')
-  dependencies.reviewService.reviewInbound = async () => ({ action: 'review', item: { id: 'review-2' } })
-  dependencies.queueModule.removePendingAiReplyJobs = async () => { throw new Error('redis unavailable') }
-  const processAfterStore = createInboundMessagePostProcessor(dependencies)
-
-  const result = await processAfterStore({ id: 'message-4', conversationId: 'conversation-4' })
-  assert.equal(result.reviewQueued, true)
-  assert.equal(calls.some(call => call[0] === 'route'), false)
+test('人工认领后不创建AI任务', async () => {
+  const { dependencies } = createDependencies('pending_human')
+  dependencies.poolService.routeIncomingMessage = async () => ({ poolType: 'pending_human', convStatus: 'pending_claim', claimedBy: 1 })
+  assert.equal((await createInboundMessagePostProcessor(dependencies)({ conversationId: 'claimed' })).aiReplyQueued, false)
 })

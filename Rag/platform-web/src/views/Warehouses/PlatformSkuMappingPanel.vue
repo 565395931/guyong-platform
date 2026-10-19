@@ -40,7 +40,7 @@ const loading = ref(false)
 const dialogVisible = ref(false)
 const filters = reactive({ channel: '', accountId: '' })
 const form = reactive({ channel: '', accountId: '', externalSku: '', internalSkuCode: '' })
-const canManage = computed(() => { try { return ['admin', 'supervisor'].includes(JSON.parse(localStorage.getItem('platform_user') || '{}')?.role) } catch { return false } })
+const canManage = computed(() => { try { return ['admin'].includes(JSON.parse(localStorage.getItem('platform_user') || '{}')?.role) } catch { return false } })
 
 async function load() {
   loading.value = true

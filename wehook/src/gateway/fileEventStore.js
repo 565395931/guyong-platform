@@ -23,7 +23,7 @@ class FileEventStore {
   _save() {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true })
     const tmp = `${this.filePath}.${process.pid}.tmp`
-    fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2))
+    fs.writeFileSync(tmp, JSON.stringify(this.state, null, 2), { mode: 0o600 })
     fs.renameSync(tmp, this.filePath)
   }
 
@@ -135,6 +135,16 @@ class FileEventStore {
       .map(clone)
   }
   getCursor() { return this.state.cursor || 0 }
+  purgeAccount(accountId) {
+    const removed = new Set(this.state.events.filter(row => row.payload?.accountId === accountId).map(row => row.eventId))
+    this.state.events = this.state.events.filter(row => !removed.has(row.eventId))
+    this.state.commands = this.state.commands.filter(row => row.payload?.accountId !== accountId)
+    this.state.attempts = this.state.attempts.filter(row => !removed.has(row.eventId))
+    this.state.deadLetters = this.state.deadLetters.filter(row => !removed.has(row.eventId))
+    this.state.events.forEach((row, index) => { row.sequence = index + 1 })
+    for (const row of this.state.deadLetters) row.sequence = this.state.events.find(event => event.eventId === row.eventId)?.sequence
+    this._recomputeCursor(); this._save()
+  }
   stats() {
     return {
       pendingEvents: this.state.events.filter(event => event.status === 'pending').length,

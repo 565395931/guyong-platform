@@ -82,7 +82,7 @@ test('uses the current database role instead of a stale JWT role', async () => {
     findUser: async () => ({
       id: 8,
       username: 'manager-8',
-      role: 'supervisor',
+      role: 'admin',
       status: 'active'
     })
   })
@@ -90,7 +90,7 @@ test('uses the current database role instead of a stale JWT role', async () => {
   await authenticate(req, res, () => { nextCalls += 1 })
 
   assert.equal(nextCalls, 1)
-  assert.equal(req.user.role, 'supervisor')
+  assert.equal(req.user.role, 'admin')
 })
 
 test('does not expose JWT parser details in authentication errors', async () => {

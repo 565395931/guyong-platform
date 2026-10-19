@@ -50,6 +50,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 CRED_FILE = os.path.join(HERE, ".bridge-node.json")
+OUTBOX_FILE = os.path.join(HERE, ".bridge-outbox.json")
 PROTOCOL_VERSION = "1.0"
 NODE_VERSION = "1.0.0"
 
@@ -159,6 +160,13 @@ class BridgeNode:
         self.allow_send = allow_send
 
         self.ws = None
+        self.accounts: dict[int, dict] = {}
+        self.ui_lock = threading.RLock()
+        self.pending_events: dict[str, dict] = {}
+        self.last_outbox_retry = 0.0
+        if self.allow_send and os.path.isfile(OUTBOX_FILE):
+            with open(OUTBOX_FILE, encoding="utf-8") as fh:
+                self.pending_events = json.load(fh)
         self.leases: list[dict] = []
         self.known_fingerprints: dict[int, set] = {}
         self.last_heartbeat = 0.0
@@ -229,6 +237,7 @@ class BridgeNode:
             config = frame.get("payload", {}).get("configuration", {}) or {}
             self.heartbeat_interval = float(config.get("heartbeatIntervalMs", 15000)) / 1000.0
             accounts = config.get("accounts", []) or []
+            self.accounts = {int(a["accountId"]): a for a in accounts}
             self.leases = [
                 {
                     "accountId": a["accountId"],
@@ -237,10 +246,13 @@ class BridgeNode:
                 }
                 for a in accounts
             ]
-            if self.account_id is None and accounts:
-                self.account_id = int(accounts[0]["accountId"])
+            feige_accounts = [a for a in accounts if a.get("adapterId") == "doudian.feige"]
+            if self.account_id not in [int(a["accountId"]) for a in feige_accounts]:
+                self.account_id = int(feige_accounts[0]["accountId"]) if len(feige_accounts) == 1 else None
+            self.pdd_account_id = None
+            pdd_accounts = [a for a in accounts if a.get("adapterId") == "pinduoduo.workbench"]
             for account in accounts:
-                if account.get("adapterId") == "pinduoduo.workbench":
+                if len(pdd_accounts) == 1 and account.get("adapterId") == "pinduoduo.workbench":
                     self.pdd_account_id = int(account["accountId"])
             log(f"node.ready：下发 {len(accounts)} 个账号，租约 {len(self.leases)} 个"
                 f"，心跳间隔 {self.heartbeat_interval:.0f}s")
@@ -256,6 +268,9 @@ class BridgeNode:
             payload = frame.get("payload", {})
             status = payload.get("status")
             ack_for = payload.get("ackForEventId")
+            if status in ("processed", "duplicate", "rejected") and ack_for in self.pending_events:
+                self.pending_events.pop(ack_for)
+                self._save_outbox()
             pending = getattr(self, "pending_order_uploads", None)
             if pending is not None and ack_for in pending:
                 count = pending.pop(ack_for)
@@ -297,6 +312,26 @@ class BridgeNode:
         }, node_key=self.node_key)))
         self.last_heartbeat = time.monotonic()
 
+    def _save_outbox(self) -> None:
+        with open(OUTBOX_FILE + ".tmp", "w", encoding="utf-8") as fh:
+            json.dump(self.pending_events, fh, ensure_ascii=False)
+        os.replace(OUTBOX_FILE + ".tmp", OUTBOX_FILE)
+
+    def send_reliable(self, event: dict) -> None:
+        if not self.allow_send:
+            return
+        self.pending_events[event["eventId"]] = event
+        self._save_outbox()  # 先落盘，再发送；ACK 丢失时使用相同 eventId 重放。
+        self.ws.send(json.dumps(event, ensure_ascii=False))
+
+    def retry_outbox(self) -> None:
+        if not self.allow_send or time.monotonic() - self.last_outbox_retry < 10:
+            return
+        self.last_outbox_retry = time.monotonic()
+        for event in list(self.pending_events.values()):
+            if event.get("nodeId") == self.node_key:
+                self.ws.send(json.dumps(event, ensure_ascii=False))
+
     def send_command_status(self, command_id: str, status: str,
                             platform_message_id: Optional[str] = None,
                             error_code: Optional[str] = None,
@@ -317,18 +352,23 @@ class BridgeNode:
         实际写入/点击逻辑在 feige_send.send_text，它自带三道验证：
         会话校验（防止把消息发给别的客户）、写入后回读、发送后确认输入框已清空。
         """
-        import feige_send
-
         payload = frame.get("payload") or {}
         command_id = frame.get("commandId") or payload.get("commandId")
         if not command_id:
             return
+        account = self.accounts.get(payload.get("accountId"), {})
+        if not self.allow_send or account.get("adapterId") != "doudian.feige":
+            self.send_command_status(command_id, "failed", error_code="ADAPTER_SEND_UNAVAILABLE",
+                                     error_message="This account has no enabled desktop sender")
+            return
+        import feige_send
         text = str(payload.get("content") or "")
         # targetUserId 是客户键，节点用它确认客户端当前打开的会话就是这个客户
         expect = payload.get("targetUserId") or payload.get("platformConversationId")
 
         try:
-            result = feige_send.send_text(text, expect_customer_key=expect or None)
+            with self.ui_lock:
+                result = feige_send.send_text(text, expect_customer_key=expect or None)
         except Exception as exc:  # noqa: BLE001
             log(f"发送指令 {str(command_id)[:8]} 执行异常: {type(exc).__name__}: {exc}")
             self.send_command_status(command_id, "failed",
@@ -464,17 +504,22 @@ class BridgeNode:
             log(f"[千帆订单] 读取采集结果失败（{latest}）：{type(exc).__name__}: {exc}")
             return
         orders = ((payload.get("orders") or {}).get("rows")) or []
+        accounts = [a for a in self.accounts.values() if a.get("adapterId") == "xiaohongshu.qianfan"]
+        if len(accounts) != 1:
+            log("[千帆订单] 需要唯一的已绑定千帆账号，跳过上报")
+            return
         if not orders:
             log("[千帆订单] 本次采集无订单，跳过上报")
             return
         env = envelope("commerce.orders.scraped", {
             "adapterId": payload.get("adapterId") or "xiaohongshu.qianfan",
             "source": "qianfan_orders",
+            "accountId": int(accounts[0]["accountId"]),
             "capturedAt": payload.get("capturedAt"),
             "orders": orders,
         }, node_key=self.node_key)
         self.pending_order_uploads[env["eventId"]] = len(orders)
-        self.ws.send(json.dumps(env, ensure_ascii=False))
+        self.send_reliable(env)
         log(f"[千帆订单] 已上报 {len(orders)} 条订单，等待入库确认…")
 
     def start_pdd_reader(self) -> None:
@@ -503,6 +548,9 @@ class BridgeNode:
                 log(f"[拼多多] 哨兵初始化失败，回退定时轮询: {exc}")
             last_full = 0.0
             while not self.pdd_stop.is_set():
+                if self.pdd_account_id is None or self.ws is None:
+                    self.pdd_stop.wait(2.0)
+                    continue
                 triggered = False
                 try:
                     if sentinel is not None:
@@ -517,7 +565,8 @@ class BridgeNode:
                     continue
                 last_full = time.monotonic()
                 try:
-                    result = reader.read_once(only_changed=True, log=lambda m: log(f"[拼多多] {m}"))
+                    with self.ui_lock:
+                        result = reader.read_once(only_changed=not due, log=lambda m: log(f"[拼多多] {m}"))
                     for index, msg in enumerate(result.get("newMessages", [])):
                         if self.pdd_account_id is None:
                             log("[拼多多] 尚未认领账号（等待 node.ready），本条留在下轮")
@@ -729,7 +778,26 @@ class BridgeNode:
         return payload
 
     # -- 主循环 ----------------------------------------------------------
+    def _heartbeat_loop(self, stop: threading.Event) -> None:
+        # OCR/历史回翻/订单采集可能超过租约 TTL；续租不能等 UI 操作结束。
+        while not stop.wait(1.0):
+            if self.ws and self.leases and time.monotonic() - self.last_heartbeat >= self.heartbeat_interval:
+                try:
+                    self.send_heartbeat()
+                except Exception:
+                    pass  # 主循环负责重连。
+
     def run(self, max_iterations: Optional[int] = None) -> int:
+        heartbeat_stop = threading.Event()
+        thread = threading.Thread(target=self._heartbeat_loop, args=(heartbeat_stop,), daemon=True)
+        thread.start()
+        try:
+            return self._run_main(max_iterations)
+        finally:
+            heartbeat_stop.set()
+            self.pdd_stop.set()
+
+    def _run_main(self, max_iterations: Optional[int] = None) -> int:
         if self.account_id is None:
             log("尚未确定账号 id，等待 node.ready 下发…")
         if not self.allow_send:
@@ -751,6 +819,7 @@ class BridgeNode:
                     self.handle_frame(frame)
 
                 # 2) 续租
+                self.retry_outbox()
                 if self.leases and time.monotonic() - self.last_heartbeat >= self.heartbeat_interval:
                     self.send_heartbeat()
 
@@ -764,25 +833,26 @@ class BridgeNode:
                     self.run_command(self.command_queue.pop(0))
 
                 # 2.8) 千帆订单定时采集（到点触发；采集期间本循环暂停，恢复后补读消息）
-                self.maybe_collect_qianfan_orders()
+                with self.ui_lock:
+                    self.maybe_collect_qianfan_orders()
 
                 # 2.85) 上报拼多多读取器产出的消息（线程摄入队列，这里统一发 WS）
-                while not self.pdd_queue.empty():
+                while self.allow_send and not self.pdd_queue.empty():
                     payload = self.pdd_queue.get()
                     try:
-                        self.ws.send(json.dumps(
-                            envelope("message.inbound", payload, node_key=self.node_key),
-                            ensure_ascii=False))
+                        self.send_reliable(envelope("message.inbound", payload, node_key=self.node_key))
                         log(f"[拼多多] 已上报 {payload['channelMessageId'][:12]} "
                             f"dir={payload['platformPayload']['direction']} "
                             f"conv={payload['platformConversationId']} "
                             f"len={len(payload['content'])}")
                     except Exception as exc:  # noqa: BLE001
+                        self.pdd_queue.put(payload)
                         log(f"[拼多多] 上报失败: {type(exc).__name__}: {exc}")
+                        raise
 
                 # 3) 采集并上报
                 try:
-                    fresh = self.poll_once()
+                    fresh = self.poll_once() if self.account_id else []
                 except SystemExit as exc:
                     log("读取界面失败（客户端可能未运行或已最小化）:", str(exc)[:120])
                     fresh = []
@@ -796,8 +866,7 @@ class BridgeNode:
                             f"dir={payload['platformPayload']['direction']} "
                             f"len={payload['platformPayload']['contentLength']}")
                         continue
-                    self.ws.send(json.dumps(envelope("message.inbound", payload,
-                                                     node_key=self.node_key)))
+                    self.send_reliable(envelope("message.inbound", payload, node_key=self.node_key))
                     log(f"已上报 {payload['channelMessageId'][:12]} "
                         f"dir={payload['platformPayload']['direction']} "
                         f"len={payload['platformPayload']['contentLength']}")

@@ -15,6 +15,18 @@ const { getIO } = require('./socketHandler')
 const { INTERNAL_EVENTS, SOCKET_EVENTS, ROOMS } = require('./events')
 const { POOL_TYPE } = require('../conversation-pool/constants')
 
+async function pruneConversationViewers(io, conversationId, ownership) {
+  if (!conversationId) return
+  const room = ROOMS.conversationRoom(conversationId)
+  const viewers = await io.in(room).fetchSockets()
+  for (const viewer of viewers) {
+    if (viewer.role === 'agent' && !await require('../conversation-pool/workspace.service').createWorkspaceService({sequelize:require('../../config/database').sequelize}).canView(viewer.userId,'agent',conversationId)) {
+      viewer.leave(room)
+      viewer.emit(SOCKET_EVENTS.CONVERSATION_UPDATE, { id: conversationId, conversationId, type: 'transferred_out' })
+    }
+  }
+}
+
 function extractPhoneFromChatId(chatId) {
   if (!chatId || typeof chatId !== 'string') return null
   const trimmed = chatId.trim()
@@ -72,7 +84,10 @@ async function getConversationInfo(conversationId) {
        FROM conversations WHERE id = :id LIMIT 1`,
       { replacements: { id: conversationId } }
     )
-    return results.length > 0 ? results[0] : null
+    if (!results.length) return null
+    const [participants] = await sequelize.query(`SELECT DISTINCT h.user_id FROM conversation_seat_history h WHERE h.conversation_id=:id AND EXISTS
+      (SELECT 1 FROM seat_account_bindings b WHERE b.seat_id=h.user_id AND b.account_id=:accountId AND b.status='active')`,{replacements:{id:conversationId,accountId:results[0].account_id}})
+    return { ...results[0], participant_seat_ids: participants.map(row=>Number(row.user_id)) }
   } catch (err) {
     // conversations 表可能尚未创建，静默失败
     return null
@@ -102,12 +117,14 @@ function initializePushService(eventEmitter) {
       const convInfo = await getConversationInfo(message.conversationId)
       const poolType = convInfo?.pool_type || POOL_TYPE.AI_SELF
       const claimedBy = convInfo?.claimed_by || null
+      await pruneConversationViewers(io, message.conversationId, convInfo)
 
       // 构建附带会话信息的消息体
       const messageWithConv = {
         ...message,
         conversation: convInfo ? {
           id: message.conversationId,
+          participant_seat_ids: convInfo.participant_seat_ids,
           channel: convInfo.channel,
           account_id: convInfo.account_id,
           user_id: convInfo.user_id,
@@ -132,12 +149,12 @@ function initializePushService(eventEmitter) {
       // 根据池类型决定推送目标
       if (poolType === POOL_TYPE.PRIVATE || poolType === POOL_TYPE.LONG_TERM) {
         // 私有池/长期跟进池 → 推送给认领坐席；同时推送给当前会话房间，支持
-        // admin/supervisor 或已授权坐席打开会话时实时收到消息。
+        // admin 或已授权坐席打开会话时实时收到消息。
         const conversationRoom = ROOMS.conversationRoom(message.conversationId)
         if (claimedBy) {
-          io.to(ROOMS.userRoom(claimedBy))
-            .to(conversationRoom)
-            .emit(SOCKET_EVENTS.NEW_MESSAGE, messageWithConv)
+          let recipients = io.to(ROOMS.userRoom(claimedBy)).to(conversationRoom).to(ROOMS.PUBLIC_POOL)
+          for (const seatId of convInfo?.participant_seat_ids || []) recipients = recipients.to(ROOMS.userRoom(seatId))
+          recipients.emit(SOCKET_EVENTS.NEW_MESSAGE, messageWithConv)
           console.log(`[PushService] 新消息已推送给坐席 ${claimedBy} 和会话房间（${poolType}），会话 ${message.conversationId}`)
         } else {
           io.to(conversationRoom).emit(SOCKET_EVENTS.NEW_MESSAGE, messageWithConv)
@@ -148,10 +165,12 @@ function initializePushService(eventEmitter) {
         // 注意：客户端可能同时加入 public_pool 和 pool:xxx，必须用一次链式 emit，Socket.IO 会按 socket 去重；
         // 分两次 emit 会导致前端收到两条完全相同的 new_message。
         const poolRoom = ROOMS.poolRoom(poolType)
-        const target = poolRoom === ROOMS.PUBLIC_POOL
+        let target = poolRoom === ROOMS.PUBLIC_POOL
           ? io.to(poolRoom)
           : io.to(poolRoom).to(ROOMS.PUBLIC_POOL)
-        target.emit(SOCKET_EVENTS.NEW_MESSAGE, messageWithConv)
+        if (poolType === 'ai_self') target = target.to(`account:${convInfo?.account_id}:ai`)
+        if (convInfo?.agent_id) target = target.to(ROOMS.userRoom(convInfo.agent_id))
+        target.to(ROOMS.conversationRoom(message.conversationId)).emit(SOCKET_EVENTS.NEW_MESSAGE, messageWithConv)
         console.log(`[PushService] 新消息已推送到 ${poolType} 池，会话 ${message.conversationId}`)
       }
     } catch (err) {
@@ -167,6 +186,7 @@ function initializePushService(eventEmitter) {
 
       const convInfo = await getConversationInfo(data.conversationId)
       const claimedBy = convInfo?.claimed_by || null
+      await pruneConversationViewers(io, data.conversationId, convInfo)
       const conversationRoom = data.conversationId ? ROOMS.conversationRoom(data.conversationId) : null
       if (claimedBy) {
         const target = conversationRoom
@@ -187,6 +207,8 @@ function initializePushService(eventEmitter) {
       const io = getIO()
       if (!io) return
 
+      if (data.conversationId) await pruneConversationViewers(io, data.conversationId, await getConversationInfo(data.conversationId))
+
       const { type, previousAgentId, operatorId } = data
 
       // 池变更/抢单/释放 → 广播到所有池房间（让坐席列表更新）
@@ -197,9 +219,12 @@ function initializePushService(eventEmitter) {
           .to(ROOMS.PENDING_HUMAN_POOL)
           .emit(SOCKET_EVENTS.POOL_CHANGE, data)
 
+        const info = data.conversationId ? await getConversationInfo(data.conversationId) : null
+        if (info?.pool_type === 'ai_self') io.to(`account:${info.account_id}:ai`).emit(SOCKET_EVENTS.POOL_CHANGE,{...data,conversation:info})
+        for (const seatId of info?.participant_seat_ids || []) io.to(ROOMS.userRoom(seatId)).emit(SOCKET_EVENTS.CONVERSATION_UPDATE,{...data,conversation:info})
         // 如果有具体的目标坐席，也推送到个人房间
-        if (data.conversation?.claimed_by) {
-          io.to(ROOMS.userRoom(data.conversation.claimed_by)).emit(SOCKET_EVENTS.CONVERSATION_UPDATE, data)
+        if (data.conversation?.claimed_by || data.conversation?.agent_id) {
+          io.to(ROOMS.userRoom(data.conversation.claimed_by || data.conversation.agent_id)).emit(SOCKET_EVENTS.CONVERSATION_UPDATE, data)
         }
         if (operatorId) {
           io.to(ROOMS.userRoom(operatorId)).emit(SOCKET_EVENTS.CONVERSATION_UPDATE, data)
@@ -268,6 +293,7 @@ function initializePushService(eventEmitter) {
       const convInfo = await getConversationInfo(data.conversationId)
       const poolType = convInfo?.pool_type || POOL_TYPE.AI_SELF
       const claimedBy = convInfo?.claimed_by || null
+      await pruneConversationViewers(io, data.conversationId, convInfo)
       const conversationRoom = ROOMS.conversationRoom(data.conversationId)
       const payload = {
         ...data,
@@ -284,7 +310,7 @@ function initializePushService(eventEmitter) {
         }
       } else {
         const poolRoom = ROOMS.poolRoom(poolType)
-        const target = poolRoom === ROOMS.PUBLIC_POOL
+        let target = poolRoom === ROOMS.PUBLIC_POOL
           ? io.to(poolRoom).to(conversationRoom)
           : io.to(poolRoom).to(ROOMS.PUBLIC_POOL).to(conversationRoom)
         target.emit(SOCKET_EVENTS.AI_REPLY_STATUS, payload)
@@ -301,7 +327,7 @@ function initializePushService(eventEmitter) {
       if (!io) return
 
       // 广播坐席状态变更到公共池房间
-      io.to(ROOMS.PUBLIC_POOL).emit(SOCKET_EVENTS.SEAT_STATUS_CHANGE, data)
+      io.to(ROOMS.PUBLIC_POOL).to(ROOMS.userRoom(data.userId)).emit(SOCKET_EVENTS.SEAT_STATUS_CHANGE, data)
       console.log(`[PushService] 坐席状态变更已广播: 坐席 ${data.userId} → ${data.status}`)
     } catch (err) {
       console.error('[PushService] 推送坐席状态变更失败:', err.message)

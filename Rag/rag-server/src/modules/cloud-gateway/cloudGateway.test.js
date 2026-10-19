@@ -290,3 +290,22 @@ test('企业微信出站 sent 状态更新账号最近出站时间', async () =>
   assert.equal(sent.some(item => item.type === 'gateway.event.ack' && item.ackForEventId === 'status-event-1'), true)
   assert.equal(gateway.accountMapper.resolveByAccountId(17).channel, 'wecom_kf')
 })
+
+test('迟到accepted回执按数据库终态推送，不能让已发送气泡倒退', async () => {
+ const { INTERNAL_EVENTS } = require('../websocket/events')
+ const link = new EventEmitter(); link.send = ()=>{}; link.start = ()=>{}
+ const events = new EventEmitter(), updates = []
+ events.on(INTERNAL_EVENTS.MESSAGE_UPDATE, value=>updates.push(value))
+ initCloudGateway({eventEmitter:events,options:{link,enabled:false,registerRuntime:false,updateMessageStatus:async()=>({affectedRows:1,sendStatus:'sent'})}})
+ link.emit('status',{eventId:'late-accepted',payload:{status:'accepted',localMessageId:'m',conversationId:'c',channel:'wechat_shop'}})
+ await new Promise(resolve=>setImmediate(resolve))
+ assert.equal(updates.length,1)
+ assert.equal(updates[0].sendStatus,'sent')
+})
+
+test('remote failed receipt invokes AI delivery fallback after persistent status update',async()=>{
+ const link=new EventEmitter();link.send=()=>{};link.start=()=>{};const calls=[];
+ initCloudGateway({eventEmitter:new EventEmitter(),options:{link,enabled:false,registerRuntime:false,updateMessageStatus:async()=>{calls.push('saved');return {affectedRows:1,sendStatus:'failed'}},onAiDeliveryFailure:async id=>calls.push(id)}});
+ link.emit('status',{eventId:'failure',payload:{status:'failed',localMessageId:'ai-text',conversationId:'fixture',channel:'wechat_shop'}});
+ await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(calls,['saved','ai-text']);
+})

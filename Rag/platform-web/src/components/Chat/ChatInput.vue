@@ -1,5 +1,6 @@
 <template>
-  <div class="chat-input">
+  <div class="chat-input" :class="{ 'is-dragging': dragging }" @paste="handlePaste" @dragover.prevent="dragging = true" @dragleave.self="dragging = false" @drop.prevent="handleDrop">
+    <div v-if="dragging" class="chat-input__drop-hint" role="status">松开图片，添加到消息</div>
     <div class="chat-input__editor-wrap">
       <el-input
         v-model="text"
@@ -48,7 +49,7 @@
           v-if="selectedFile?.mediaType === 'image'"
           :src="selectedFile?.url"
           class="chat-input__file-thumb"
-          alt=""
+          alt="待发送图片预览"
         />
         <el-icon v-else-if="selectedFile?.mediaType === 'video'"><VideoPlay /></el-icon>
         <el-icon v-else><Document /></el-icon>
@@ -56,6 +57,8 @@
       </div>
       <el-button text size="small" type="danger" @click="clearSelectedFile">移除</el-button>
     </div>
+    <div v-if="uploadError" class="chat-input__upload-error" role="alert">{{ uploadError }}</div>
+    <div v-if="shopImageOnly" class="chat-input__image-help" role="status">可粘贴或拖入 JPG / PNG 图片，最大 5MB；图片与文字分开发送。</div>
     <div class="chat-input__toolbar">
       <div class="chat-input__left">
         <el-popover trigger="click" width="200" placement="top-start">
@@ -69,10 +72,11 @@
         <el-upload
           :show-file-list="false"
           :auto-upload="false"
-          accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.rar"
+          :disabled="props.disabled || uploadLoading"
+          :accept="shopImageOnly ? 'image/png,image/jpeg' : 'image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.rar'"
           @change="handleLocalUpload"
         >
-          <el-button circle size="small"><el-icon><Paperclip /></el-icon></el-button>
+          <el-button :disabled="props.disabled || uploadLoading" :loading="uploadLoading" size="small" aria-label="添加图片或附件"><el-icon><Paperclip /></el-icon>图片 / 附件</el-button>
         </el-upload>
         <el-button
           circle
@@ -154,12 +158,16 @@ import { ElMessage } from 'element-plus'
 
 const props = defineProps({
   disabled: { type: Boolean, default: false },
-  sendingMode: { type: String, default: '' }
+  sendingMode: { type: String, default: '' },
+  channel: { type: String, default: '' }
 })
 
 const emit = defineEmits(['send'])
 const text = ref('')
 const selectedFile = ref(null)
+const dragging = ref(false)
+const uploadError = ref('')
+const shopImageOnly = computed(() => props.channel === 'wechat_shop')
 const fileList = ref([])
 const loading = ref(false)
 const filePanelOpen = ref(false)
@@ -206,9 +214,9 @@ const onSearch = () => {
   fetchFiles()
 }
 
-const canSend = computed(() => !props.disabled && Boolean(text.value.trim() || selectedFile.value))
+const canSend = computed(() => !uploadLoading.value && !props.disabled && Boolean(text.value.trim() || selectedFile.value))
 const canTranslateAndSend = computed(() =>
-  !props.disabled && !selectedFile.value && Boolean(text.value.trim())
+  !uploadLoading.value && !props.disabled && !selectedFile.value && Boolean(text.value.trim())
 )
 
 const getCurrentCommand = () => {
@@ -349,10 +357,22 @@ const handleLibrarySelect = (file) => {
 
 // ---- 自行上传本地文件（先上传到后台，再选为发送附件）----
 const uploadLoading = ref(false)
+const handlePaste = (event) => {
+  const file = [...(event.clipboardData?.files || [])].find(f => f.type.startsWith('image/'))
+  if (!file) return
+  event.preventDefault(); handleLocalUpload({ raw: file })
+}
+const handleDrop = (event) => {
+  dragging.value = false
+  const files = [...(event.dataTransfer?.files || [])]
+  if (files.length !== 1) { ElMessage.warning('一次请选择一张图片或一个附件'); return }
+  handleLocalUpload({ raw: files[0] })
+}
 const handleLocalUpload = async (uploadFile) => {
   const raw = uploadFile?.raw
-  if (!raw) return
-
+  if (!raw || props.disabled || uploadLoading.value) return
+  if (shopImageOnly.value && (!['image/png', 'image/jpeg'].includes(raw.type) || raw.size > 5 * 1024 * 1024)) { uploadError.value = '请选择 5MB 以内的 JPG 或 PNG 图片'; return }
+  uploadError.value = ''
   uploadLoading.value = true
   try {
     const res = await uploadMediaFile(raw)
@@ -376,7 +396,8 @@ const handleLocalUpload = async (uploadFile) => {
     }
     ElMessage.success('文件已上传')
   } catch (err) {
-    ElMessage.error('上传失败: ' + (err.message || '未知错误'))
+    uploadError.value = '上传失败：' + (err.message || '请重试')
+    ElMessage.error(uploadError.value)
   } finally {
     uploadLoading.value = false
   }
@@ -408,11 +429,10 @@ const handleSend = () => {
   if (selectedFile.value) {
     emit('send', {
       type: selectedFile.value.mediaType || 'file',
-      caption: text.value.trim(),
+      caption: shopImageOnly.value ? '' : text.value.trim(),
       file: selectedFile.value
     })
-    text.value = ''
-    selectedFile.value = null
+    // 请求被接受后由父组件清除附件，失败保留草稿。
     filePanelOpen.value = false
     return
   }
@@ -445,6 +465,7 @@ defineExpose({
       text.value = ''
     }
   },
+  clearFileIfMatches: (id) => { if (selectedFile.value?.id === id) { selectedFile.value = null; if (!shopImageOnly.value) text.value = '' } },
   setFile: (file) => { selectedFile.value = file || null },
   focusEnd: () => {
     nextTick(() => {
@@ -460,6 +481,12 @@ defineExpose({
 </script>
 
 <style lang="scss" scoped>
+.chat-input { position: relative; }
+.chat-input.is-dragging { outline: 2px solid var(--el-color-primary); outline-offset: -2px; }
+.chat-input__drop-hint { position: absolute; inset: 8px; z-index: 5; display: grid; place-items: center; background: var(--el-color-primary-light-9); color: var(--el-color-primary); pointer-events: none; border: 1px dashed currentColor; border-radius: 8px; }
+.chat-input__image-help, .chat-input__upload-error { font-size: 12px; line-height: 1.5; padding: 4px 0; color: var(--el-text-color-secondary); }
+.chat-input__upload-error { color: var(--el-color-danger); }
+
 .chat-input {
   border-top: 1px solid #e2e8f0;
   padding: 8px 12px;
@@ -562,8 +589,8 @@ defineExpose({
     margin-left: auto;
   }
   &__file-thumb {
-    width: 24px;
-    height: 24px;
+    width: 96px;
+    height: 72px;
     border-radius: 4px;
     object-fit: cover;
     flex-shrink: 0;

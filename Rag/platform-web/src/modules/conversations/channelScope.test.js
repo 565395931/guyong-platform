@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { resolveChannelScope } from './channelScope.js'
+import { resolveChannelScope, conversationMatchesScope } from './channelScope.js'
 
 test('locks WeCom conversation routes to the official channel code', () => {
   assert.deepEqual(resolveChannelScope('wecom_kf'), {
@@ -55,4 +55,19 @@ test('query channel overrides route metadata and supports every commerce channel
 test('empty or unknown scopes remain unrestricted', () => {
   assert.equal(resolveChannelScope({}).fixedChannel, '')
   assert.equal(resolveChannelScope({ prop: 'unknown' }).fixedChannel, '')
+})
+
+test('shop and remaining commerce routes are isolated rather than falling back to all channels', () => {
+  for (const channel of ['wechat_shop', 'xiaohongshu', 'kuaishou']) {
+    assert.equal(resolveChannelScope(channel).fixedChannel, channel)
+    assert.equal(resolveChannelScope(channel).filterLocked, true)
+  }
+})
+
+test('selection must match both channel and account boundaries', () => {
+  const conversation = { channel: 'wechat_shop', account_id: 1 }
+  assert.equal(conversationMatchesScope(conversation, { channel: 'wechat_shop', accountId: '1' }), true)
+  assert.equal(conversationMatchesScope(conversation, { channel: 'douyin' }), false)
+  assert.equal(conversationMatchesScope(conversation, { accountId: 2 }), false)
+  assert.equal(conversationMatchesScope(null), false)
 })

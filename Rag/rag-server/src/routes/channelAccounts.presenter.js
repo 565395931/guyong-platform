@@ -226,6 +226,8 @@ function presentChannelAccountListItem(account, {
 } = {}) {
   const result = { ...account }
 
+  if (result.adapter_type === 'wechat_shop_cloud') { delete result.config; result.credentialStatus = 'configured'; return result }
+
   if (matchesCommerceAccount(result, 'xiaohongshu', 'xiaohongshu_commerce')) {
     addBridgeCommerceCredentialSummary(result, parseXiaohongshuConfig, ['appKey', 'appSecret', 'accessToken', 'shopId'])
     return result
@@ -290,6 +292,8 @@ function presentChannelAccountDetail(account, {
   defaultWahaEngine = 'gows'
 } = {}) {
   const result = { ...account }
+
+  if (result.adapter_type === 'wechat_shop_cloud') { delete result.config; result.credentialStatus = 'configured'; return result }
 
   if (matchesCommerceAccount(result, 'xiaohongshu', 'xiaohongshu_commerce')) {
     addBridgeCommerceCredentialSummary(result, parseXiaohongshuConfig, ['appKey', 'appSecret', 'accessToken', 'shopId'])

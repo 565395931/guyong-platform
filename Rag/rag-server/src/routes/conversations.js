@@ -4,12 +4,12 @@
  * 接口列表：
  * - GET    /api/v1/conversations                   查询会话列表（支持筛选，含 pool_type）
  * - GET    /api/v1/conversations/pool-stats        各池数量统计
- * - GET    /api/v1/conversations/assignable-seats  可分配坐席列表（supervisor/admin）
- * - GET    /api/v1/conversations/pool-logs         池操作日志（supervisor/admin）
+ * - GET    /api/v1/conversations/assignable-seats  可分配坐席列表（admin）
+ * - GET    /api/v1/conversations/pool-logs         池操作日志（admin）
  * - GET    /api/v1/conversations/pool-config       获取全部配置（admin）
  * - PUT    /api/v1/conversations/pool-config/:key  更新配置项（admin，实时生效）
- * - GET    /api/v1/conversations/queue-stats       AI回复队列监控（admin/supervisor）
- * - GET    /api/v1/conversations/ai-reply-logs     AI回复业务日志（admin/supervisor）
+ * - GET    /api/v1/conversations/queue-stats       AI回复队列监控（admin）
+ * - GET    /api/v1/conversations/ai-reply-logs     AI回复业务日志（admin）
  * - GET    /api/v1/conversations/:id               查询单个会话详情
  * - PATCH  /api/v1/conversations/:id               更新会话
  * - GET    /api/v1/conversations/:id/messages      查询会话消息历史
@@ -21,7 +21,7 @@
  * - POST   /api/v1/conversations/:id/archive       归档会话
  * - POST   /api/v1/conversations/:id/revive        复活归档会话
  * - POST   /api/v1/conversations/:id/transfer-to-ai 转入 AI 自助池
- * - POST   /api/v1/conversations/:id/transfer      转交会话（supervisor/admin）
+ * - POST   /api/v1/conversations/:id/transfer      转交会话（admin）
  * - POST   /api/v1/conversations/:id/sync-history  拉取 WAHA 历史消息
  * - POST   /api/v1/conversations/sync-all-history  统一拉取历史
  * - POST   /api/v1/conversations/:id/fetch-avatar  获取/刷新联系人头像
@@ -29,7 +29,7 @@
  * - GET    /api/v1/conversations/nationalities     获取国籍字典
  * - POST   /api/v1/conversations/:id/infer-nationality 手动重新推测国籍
  *
- * 认证：需要 JWT Token（agent/supervisor/admin 权限）
+ * 认证：需要 JWT Token（agent/admin 权限）
  */
 
 const express = require('express')
@@ -1004,13 +1004,7 @@ async function findAlternateBoundWhatsappAccount(seatId, currentAccountId) {
 
 function addAgentVisibilityCondition(req, conditions, replacements, alias = 'c') {
   if (req.user.role !== 'agent') return
-  conditions.push(`(
-    ${alias}.account_id IN (
-      SELECT account_id FROM seat_account_bindings
-      WHERE seat_id = :visibilityUserId AND status = 'active'
-    )
-    AND (${alias}.claimed_by = :visibilityUserId OR ${alias}.agent_id = :visibilityUserId)
-  )`)
+  conditions.push(require('../modules/conversation-pool/workspacePolicy').agentVisibility(alias))
   replacements.visibilityUserId = getCurrentUserId(req)
 }
 
@@ -1326,67 +1320,22 @@ router.get('/', async (req, res) => {
       conditions.push('c.agent_id = :agent_id')
       namedReplacements.agent_id = parseInt(agent_id)
     }
-    if (pool_type && pool_type !== 'all') {
-      if (pool_type === POOL_TYPE.PRIVATE && req.user.role === 'agent') {
-        // 普通坐席看私有池只看自己负责且已绑定账号的会话。
-        conditions.push(`(
-          c.pool_type = :privatePool
-          AND c.account_id IN (SELECT account_id FROM seat_account_bindings WHERE seat_id = :user_id AND status = 'active')
-          AND (c.claimed_by = :user_id OR c.agent_id = :user_id)
-        )`)
-        namedReplacements.privatePool = POOL_TYPE.PRIVATE
-        namedReplacements.user_id = req.user.id || req.user.userId
-      } else if (pool_type === POOL_TYPE.LONG_TERM && req.user.role === 'agent') {
-        // 普通坐席看长期跟进池只看自己负责且已绑定账号的会话。
-        conditions.push(`(
-          c.pool_type = :longTermPool
-          AND c.account_id IN (SELECT account_id FROM seat_account_bindings WHERE seat_id = :user_id AND status = 'active')
-          AND (c.claimed_by = :user_id OR c.agent_id = :user_id)
-        )`)
-        namedReplacements.longTermPool = POOL_TYPE.LONG_TERM
-        namedReplacements.user_id = req.user.id || req.user.userId
-      } else {
-        conditions.push('c.pool_type = :pool_type')
-        namedReplacements.pool_type = pool_type
-        // 普通坐席只能看到自己负责且已绑定账号的会话
-        if (req.user.role === 'agent') {
-          const agentIdVal = req.user.id || req.user.userId
-          conditions.push(`c.account_id IN (
-            SELECT account_id FROM seat_account_bindings WHERE seat_id = :user_id AND status = 'active'
-          ) AND (c.claimed_by = :user_id OR c.agent_id = :user_id)`)
-          namedReplacements.user_id = agentIdVal
-        }
+    addAgentVisibilityCondition(req, conditions, namedReplacements)
+    const viewerId = getCurrentUserId(req)
+    namedReplacements.mineUserId = viewerId
+    const mineSql = require('../modules/conversation-pool/workspacePolicy').minePredicate('c', 'mineUserId')
+    if (pool_type === 'private') {
+      conditions.push(req.user.role === 'admin'
+        ? `(c.pool_type IN ('private','long_term') OR ${mineSql})` : mineSql)
+    } else if (pool_type && pool_type !== 'all') {
+      conditions.push('c.pool_type = :pool_type')
+      namedReplacements.pool_type = pool_type
+      if (pool_type === 'pending_human' && req.user.role === 'agent') {
+        conditions.push('c.agent_id = :mineUserId')
       }
-    } else if (!pool_type || pool_type === 'all') {
-      // 不指定 pool_type 时，按角色过滤可见范围
-      if (req.user.role === 'agent') {
-        // 普通坐席只看到自己负责且已绑定账号的会话。
-        const agentIdVal = req.user.id || req.user.userId
-        conditions.push(`(
-          c.account_id IN (SELECT account_id FROM seat_account_bindings WHERE seat_id = :user_id AND status = 'active')
-          AND (c.claimed_by = :user_id OR c.agent_id = :user_id)
-        )`)
-        namedReplacements.user_id = agentIdVal
-      }
-      // supervisor/admin 可以看到所有
     }
-    if (conv_status) {
-      // 显式指定 conv_status 时（如归档 Tab），用指定值过滤
-      conditions.push('c.conv_status = :conv_status')
-      namedReplacements.conv_status = conv_status
-    } else if (status) {
-      conditions.push('c.conv_status = :convStatus')
-      namedReplacements.convStatus = status
-    } else if (pool_type !== POOL_TYPE.PRIVATE) {
-      // 默认排除已归档（非归档 Tab 不显示归档会话）。
-      //
-      // ⚠️「我的」例外：归档只写 conv_status='archived' + status='closed'，
-      // **不动 pool_type / claimed_by**（三条归档路径 accountSnapshotService、
-      // bridgeExpiryService、POST /:id/archive 都是如此），认领关系天然保留。
-      // 所以这里不做归档过滤，同一个会话就能同时出现在「我的」和「已归档」
-      // 两个 Tab 里——这正是需求"归档后各显示一份"。长期跟进池仍按默认排除。
-      conditions.push("c.conv_status != 'archived'")
-    }
+    if (conv_status === 'archived' || status === 'archived') conditions.push("(c.conv_status = 'archived' OR c.status = 'closed')")
+    else conditions.push("c.conv_status != 'archived' AND c.status != 'closed'")
     if (search) {
       conditions.push('(c.user_name LIKE :search OR c.last_message LIKE :search OR c.user_id LIKE :search)')
       namedReplacements.search = `%${search}%`
@@ -1402,7 +1351,7 @@ router.get('/', async (req, res) => {
     const queryReplacements = { ...namedReplacements, limit: limitVal, offset: offsetVal }
 
     const [rows] = await sequelize.query(
-      `SELECT c.id, c.channel, c.account_id, c.user_id, c.user_name, c.user_avatar, c.agent_id,
+      `SELECT ${mineSql} AS is_mine, c.id, c.channel, c.account_id, c.user_id, c.user_name, c.user_avatar, c.agent_id,
               c.nationality_code, c.nationality_source, c.nationality_inferred_at,
               nd.name_zh AS nationality_name, nd.name_en AS nationality_name_en,
               c.pool_type, c.conv_status, c.claimed_by, c.claimed_at, c.priority,
@@ -1455,6 +1404,28 @@ router.get('/', async (req, res) => {
 })
 
 // ========== 会话池配置管理 ==========
+router.get('/general-settings', async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ success:false,message:'仅Admin可设置' })
+  try { res.json({success:true,data:{ handoffNoticeEnabled: await configService.getConfig('handoff_notice_enabled',true),
+    handoffNoticeText: await configService.getConfig('handoff_notice_text','正在为您转接技术同事，请您耐心等待。') }}) }
+  catch { res.status(503).json({success:false,message:'通用设置读取失败，请重试'}) }
+})
+router.put('/general-settings', async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({success:false,message:'仅Admin可设置'})
+  const { handoffNoticeEnabled, handoffNoticeText } = req.body || {}
+  if (typeof handoffNoticeEnabled !== 'boolean' || typeof handoffNoticeText !== 'string'
+    || handoffNoticeText.length > 1000 || (handoffNoticeEnabled && !handoffNoticeText.trim())) {
+    return res.status(400).json({success:false,message:'请输入1000字以内的转人工提示，或关闭提示'})
+  }
+  try {
+    for (const [key,value] of [['handoff_notice_text',handoffNoticeText.trim()],['handoff_notice_enabled',handoffNoticeEnabled]]) {
+      const result = await configService.updateConfig(key,value,req.user.id)
+      if (!result.success) throw new Error('保存失败')
+    }
+    res.json({success:true,message:'通用设置已保存'})
+  } catch { res.status(503).json({success:false,message:'保存失败，请重试'}) }
+})
+
 router.get('/ai-config', async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
@@ -1514,6 +1485,24 @@ function aiProviderService() {
   return require('../modules/ai-provider/providerService').getProviderService()
 }
 
+router.put('/ai-provider/channel-prompts', async (req,res)=>{
+  if (!requireAiProviderAdmin(req,res)) return
+  try { res.json({success:true,data:await aiProviderService().saveChannelPrompts(req.body?.prompts,req.user.id || req.user.userId)}) }
+  catch(error) { res.status(400).json({success:false,message:error.message}) }
+})
+
+router.put('/ai-provider/prompt-template', async (req,res)=>{
+  if (!requireAiProviderAdmin(req,res)) return
+  try { res.json({success:true,data:await aiProviderService().saveDefaultPromptTemplate(req.body?.template,req.user.id || req.user.userId)}) }
+  catch(error) { res.status(400).json({success:false,message:error.message}) }
+})
+
+router.put('/ai-provider/enabled', async (req,res)=>{
+  if (!requireAiProviderAdmin(req,res)) return
+  try { res.json({success:true,data:await aiProviderService().setEnabled(req.body?.enabled,req.user.id || req.user.userId)}) }
+  catch(error) { res.status(400).json({success:false,message:error.message}) }
+})
+
 router.get('/ai-provider', async (req, res) => {
   if (!requireAiProviderAdmin(req, res)) return
   try { res.json({ success: true, data: await aiProviderService().getStatus() }) }
@@ -1523,12 +1512,27 @@ router.get('/ai-provider', async (req, res) => {
 router.put('/ai-provider', async (req, res) => {
   if (!requireAiProviderAdmin(req, res)) return
   try {
+    if (req.body?.baseUrl) return res.json({ success: true, data: await aiProviderService().saveConnection(req.body, req.user.id || req.user.userId) })
     const result = await aiProviderService().saveCredential(req.body?.apiKey, req.user.id || req.user.userId)
     if (!result.success) throw new Error(result.message)
     res.json({ success: true, data: await aiProviderService().getStatus() })
   } catch (error) { res.status(400).json({ success: false, message: error.message }) }
 })
 
+router.delete('/ai-provider/connection', async (req, res) => {
+  if (!requireAiProviderAdmin(req, res)) return
+  try { res.json({ success: true, data: await aiProviderService().resetConnection(req.user.id || req.user.userId) }) }
+  catch (error) { res.status(400).json({ success: false, message: error.message }) }
+})
+router.post('/ai-provider/playground', async (req, res) => {
+  if (!requireAiProviderAdmin(req, res)) return
+  try { res.json({ success: true, data: await require('../modules/ai-provider/modelPlayground').runPlayground(req.body) }) }
+  catch (error) {
+    const safeMessage = /^(百炼|模型|请选择|请先保存|请输入|未配置|未保存|AI服务)/.test(String(error.message)) ? String(error.message).slice(0,180) : ''
+    console.error('[ModelPlayground] 测试失败', JSON.stringify({ name: error.name, code: error.code || null, status: error.status || error.response?.status || null, reason: safeMessage }))
+    res.status(400).json({ success: false, message: '模型测试失败，请检查连接配置、余额和图片大小后重试' })
+  }
+})
 router.delete('/ai-provider/credential', async (req, res) => {
   if (!requireAiProviderAdmin(req, res)) return
   try {
@@ -1540,14 +1544,19 @@ router.delete('/ai-provider/credential', async (req, res) => {
 
 router.post('/ai-provider/test', async (req, res) => {
   if (!requireAiProviderAdmin(req, res)) return
-  try { res.json({ success: true, data: await aiProviderService().testConnection(req.body?.apiKey) }) }
+  try { res.json({ success: true, data: await aiProviderService().testConnection(req.body) }) }
   catch (error) { res.status(400).json({ success: false, message: error.message }) }
 })
 
 router.post('/ai-provider/models/sync', async (req, res) => {
   if (!requireAiProviderAdmin(req, res)) return
-  try { res.json({ success: true, data: await aiProviderService().syncModels() }) }
+  try { res.json({ success: true, data: await aiProviderService().syncModels(req.body) }) }
   catch (error) { res.status(400).json({ success: false, message: error.message }) }
+})
+
+router.get('/ai-provider/health', async (req, res) => {
+  try { res.json({ success: true, data: await require('../modules/ai-provider/serviceMonitor').health(aiProviderService()) }) }
+  catch { res.status(503).json({ success: false, message: '暂时无法读取模型状态' }) }
 })
 
 router.get('/ai-provider/balance', async (req, res) => {
@@ -1562,6 +1571,27 @@ router.get('/ai-provider/balance', async (req, res) => {
 function bailianService() {
   return require('../modules/ai-provider/bailianCredentialService').getBailianCredentialService()
 }
+router.put('/bailian-retrieval/enabled', async (req,res)=>{
+  if (!requireAiProviderAdmin(req,res)) return
+  try { res.json({success:true,data:await require('../modules/ai-provider/bailianSearchService').getBailianSearchService().setEnabled(req.body?.enabled,req.user.id || req.user.userId)}) }
+  catch(error) { res.status(400).json({success:false,message:error.message}) }
+})
+
+router.get('/bailian-retrieval', async (req,res)=>{
+  if (!requireAiProviderAdmin(req,res)) return
+  try { res.json({success:true,data:await require('../modules/ai-provider/bailianSearchService').getBailianSearchService().getStatus()}) }
+  catch { res.status(500).json({success:false,message:'读取百炼检索配置失败'}) }
+})
+router.put('/bailian-retrieval', async (req,res)=>{
+  if (!requireAiProviderAdmin(req,res)) return
+  try { res.json({success:true,data:await require('../modules/ai-provider/bailianSearchService').getBailianSearchService().save(req.body || {},req.user.id || req.user.userId)}) }
+  catch(error) { res.status(400).json({success:false,message:error.message}) }
+})
+router.post('/bailian-retrieval/test', async (req,res)=>{
+  if (!requireAiProviderAdmin(req,res)) return
+  try { res.json({success:true,data:await require('../modules/ai-provider/bailianSearchService').getBailianSearchService().search(req.body?.query)}) }
+  catch(error) { res.status(400).json({success:false,message:error.message}) }
+})
 
 router.get('/bailian-credential', async (req, res) => {
   if (!requireAiProviderAdmin(req, res)) return
@@ -1643,8 +1673,8 @@ router.put('/pool-config/:key', async (req, res) => {
  */
 router.get('/queue-stats', async (req, res) => {
   try {
-    if (!['admin', 'supervisor'].includes(req.user.role)) {
-      return res.status(403).json({ success: false, message: '仅管理员/主管可查看队列状态' })
+    if (!['admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: '仅管理员可查看队列状态' })
     }
     const stats = await getQueueStats()
     res.json({ success: true, data: stats })
@@ -1662,8 +1692,8 @@ router.get('/queue-stats', async (req, res) => {
  */
 router.get('/ai-reply-logs', async (req, res) => {
   try {
-    if (!['admin', 'supervisor'].includes(req.user.role)) {
-      return res.status(403).json({ success: false, message: '仅管理员/主管可查看AI日志' })
+    if (!['admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: '仅管理员可查看AI日志' })
     }
     const { conversation_id, status, limit = 50, offset = 0 } = req.query
 
@@ -1738,11 +1768,11 @@ router.get('/pool-stats', async (req, res) => {
 // ========== 池操作日志 ==========
 /**
  * GET /api/v1/conversations/pool-logs
- * 查询池操作日志（supervisor/admin 权限）
+ * 查询池操作日志（admin 权限）
  */
 router.get('/pool-logs', async (req, res) => {
   try {
-    if (!['supervisor', 'admin'].includes(req.user.role)) {
+    if (!['admin'].includes(req.user.role)) {
       return res.status(403).json({ success: false, message: '无权限查看操作日志' })
     }
 
@@ -1786,12 +1816,12 @@ router.get('/seat-load', async (req, res) => {
 // ========== 可分配坐席 ==========
 /**
  * GET /api/v1/conversations/assignable-seats
- * 管理员/主管分配会话时使用
+ * 管理员分配会话时使用
  */
 router.get('/assignable-seats', async (req, res) => {
   try {
-    if (!['admin', 'supervisor'].includes(req.user.role)) {
-      return res.status(403).json({ success: false, message: '仅管理员/主管可查看可分配坐席' })
+    if (!['admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: '仅管理员可查看可分配坐席' })
     }
 
     const [rows] = await sequelize.query(
@@ -1800,12 +1830,14 @@ router.get('/assignable-seats', async (req, res) => {
        FROM users u
        LEFT JOIN seat_status ss ON ss.user_id = u.id
        WHERE u.role IN ('agent', 'user')
-         AND u.status = 'active'
-       ORDER BY u.username ASC`
+         AND u.status = 'active' AND (:accountId IS NULL OR EXISTS
+           (SELECT 1 FROM seat_account_bindings b WHERE b.seat_id=u.id AND b.account_id=:accountId AND b.status='active'))
+       ORDER BY u.username ASC`,
+      {replacements:{accountId:req.query.account_id ? Number(req.query.account_id) : null}}
     )
 
     const seats = await Promise.all(rows.map(async row => {
-      const capacity = await poolService.checkSeatCapacity(row.id)
+      const capacity = {current:await req.app.get('workspace').dailyCount(row.id),max:null,canClaim:true}
       return {
         id: row.id,
         username: row.username,
@@ -1830,32 +1862,30 @@ router.get('/assignable-seats', async (req, res) => {
 /**
  * POST /api/v1/conversations/seat-status
  */
+router.get('/seat-status', async (req, res) => {
+  try { res.json({ success: true, data: await req.app.get('seatAssignment').presence(req.user.id) }) }
+  catch { res.status(503).json({ success: false, message: '接待状态暂时不可用，请重试' }) }
+})
+
 router.post('/seat-status', async (req, res) => {
   try {
     const { status } = req.body
     const seatId = req.user.id || req.user.userId
 
-    const validStatuss = ['online', 'offline', 'away', 'busy']
+    const validStatuss = ['online', 'offline', 'busy']
     if (!validStatuss.includes(status)) {
       return res.status(400).json({ success: false, message: '无效的状态' })
     }
 
-    await poolService.updateSeatStatus(seatId, status)
+    const load = await poolService.getSeatLoad(seatId)
+    const effectiveStatus = status
+    await poolService.updateSeatStatus(seatId, effectiveStatus)
+    await sequelize.query('UPDATE seat_status SET manual_offline = :manualOffline WHERE user_id = :seatId',
+      { replacements: { seatId, manualOffline: status === 'offline' ? 1 : 0 } })
+    req.eventEmitter?.emit(require('../modules/websocket/events').INTERNAL_EVENTS.SEAT_STATUS_CHANGE, { userId: seatId, status: effectiveStatus })
 
-    if (status === 'offline') {
-      const offlineReleaseEnabled = await poolService.isSeatOfflineReleaseEnabled()
-      if (!offlineReleaseEnabled) {
-        return res.json({
-          success: true,
-          message: '已离线，坐席离线自动释放已关闭',
-          data: { releasedCount: 0, offlineReleaseEnabled }
-        })
-      }
-      const releasedCount = await poolService.releaseOnSeatOffline(seatId, req.eventEmitter)
-      res.json({ success: true, message: `已离线，自动释放 ${releasedCount} 个会话`, data: { releasedCount } })
-    } else {
-      res.json({ success: true, message: '状态已更新' })
-    }
+    await req.app.get('seatAssignment').kick()
+    res.json({ success: true, message: '状态已更新', data: await req.app.get('seatAssignment').presence(seatId) })
   } catch (err) {
     console.error('[Conversations] 更新坐席状态失败:', err.message)
     res.status(500).json({ success: false, message: '更新失败: ' + err.message })
@@ -1866,7 +1896,7 @@ router.post('/seat-status', async (req, res) => {
 /**
  * GET /api/v1/conversations/search?q=keyword&limit=50&offset=0&start_date=&end_date=
  * 全局搜索：搜索范围包括会话字段(user_name/last_message/user_id) + 消息内容(text/translatedText)
- * 普通坐席仅可搜索自己绑定账号下可见会话；主管/管理员可搜索全部会话。
+ * 普通坐席仅可搜索自己绑定账号下可见会话；管理员可搜索全部会话。
  * 可选时间范围：start_date / end_date（ISO 日期），同时过滤会话最后消息时间和消息内容时间
  * 返回 match_type(conversation/message) + matched_text(消息匹配时的文本预览)
  */
@@ -2033,7 +2063,7 @@ router.patch('/:id', async (req, res) => {
     const replacements = {}
 
     if (agent_id !== undefined) {
-      if (!['supervisor', 'admin'].includes(req.user.role)) {
+      if (!['admin'].includes(req.user.role)) {
         return res.status(403).json({ success: false, message: '无权重新分配会话' })
       }
       if (agent_id && !await findActiveAgent(agent_id, id)) {
@@ -2047,8 +2077,11 @@ router.patch('/:id', async (req, res) => {
       replacements.status = status
     }
     if (user_name !== undefined) {
+      if (typeof user_name !== 'string' || !user_name.trim() || user_name.trim().length > 100) {
+        return res.status(400).json({ success: false, message: '备注名称须为 1–100 字的文本' })
+      }
       updates.push('user_name = :user_name')
-      replacements.user_name = user_name
+      replacements.user_name = user_name.trim()
     }
 
     if (updates.length === 0 && nationality_code === undefined) {
@@ -2257,6 +2290,8 @@ router.post('/:id/messages', async (req, res) => {
       return res.status(404).json({ success: false, message: '会话不存在' })
     }
 
+    const takeover = await req.app.get('workspace').takeOver(id, agentId, { countReply: true, allowOverride: req.user.role === 'admin' })
+    if (!takeover.success) return res.status(409).json({ success: false, message: takeover.message })
     const conv = convRows[0]
     let messageContent = typeof content === 'string' ? { text: content } : content
     let translation = {
@@ -2361,19 +2396,6 @@ router.post('/:id/messages', async (req, res) => {
           `context=${contextMessages.length}, sourceLength=${sourceText.length}, translatedLength=${translatedText.length})`
         )
       }
-    }
-
-    const claimResult = await poolService.ensureClaimedForReply(
-      id,
-      agentId,
-      req.user.username || `用户${agentId}`,
-      req.eventEmitter
-    )
-    if (!claimResult.success) {
-      return res.status(409).json({
-        success: false,
-        message: claimResult.message || '回复前认领会话失败'
-      })
     }
 
     // WhatsApp 外发：使用会话所属账号发送（conv.account_id 决定 WAHA 实例）
@@ -2539,11 +2561,12 @@ router.post('/:id/messages', async (req, res) => {
     // 3. 更新消息的渠道发送状态
     if (result.messageId) {
       try {
-        const finalSendStatus = sendResult.status === 'accepted' ? 'received' : (sendResult.success ? 'sent' : 'failed')
+        const finalSendStatus = sendResult.status === 'unknown' ? 'unknown' : sendResult.status === 'accepted' ? 'received' : (sendResult.success ? 'sent' : 'failed')
         const channelMsgId = sendResult.channelMsgId ? String(sendResult.channelMsgId) : null
         await sequelize.query(
           `UPDATE plat_messages
-           SET channel_message_id = :channelMsgId, send_status = :sendStatus,
+           SET channel_message_id = COALESCE(:channelMsgId, channel_message_id), send_status = CASE WHEN :sendStatus = 'received' AND send_status IN ('sent', 'failed', 'unknown') THEN send_status WHEN :sendStatus = 'unknown' AND send_status = 'sent' THEN send_status ELSE :sendStatus END,
+               content = CASE WHEN send_status = 'sent' THEN JSON_REMOVE(content, '$.sendError') WHEN :sendError IS NOT NULL THEN JSON_SET(COALESCE(content, JSON_OBJECT()), '$.sendError', :sendError) ELSE content END,
                account_id = :actualOutboundAccountId,
                updated_at = NOW()
            WHERE id = :messageId`,
@@ -2551,6 +2574,7 @@ router.post('/:id/messages', async (req, res) => {
             replacements: {
               channelMsgId,
               sendStatus: finalSendStatus,
+              sendError: sendResult.success ? null : (sendResult.error || sendResult.errorMessage || '平台未确认发送'),
               actualOutboundAccountId,
               messageId: result.messageId
             }
@@ -2562,6 +2586,7 @@ router.post('/:id/messages', async (req, res) => {
             conversationId: id,
             messageId: result.messageId,
             sendStatus: finalSendStatus,
+            errorMessage: sendResult.error || sendResult.errorMessage || null,
             channelMsgId,
             accountId: actualOutboundAccountId
           })
@@ -2574,7 +2599,7 @@ router.post('/:id/messages', async (req, res) => {
     if (!sendResult.success) {
       // 文案不要硬编码 WhatsApp —— 抖店等渠道发送失败时也曾显示"发送到 WhatsApp 失败"，
       // 极具误导性（实测踩过）。按实际渠道名回报。
-      const channelLabel = { whatsapp: 'WhatsApp', douyin: '抖店', wechat: '微信', wecom_kf: '企业微信' }[conv.channel] || conv.channel
+      const channelLabel = { whatsapp: 'WhatsApp', douyin: '抖店', wechat: '微信', wechat_shop: '微信小店', wecom_kf: '企业微信' }[conv.channel] || conv.channel
       return res.status(502).json({
         success: false,
         message: `消息已记录但发送到 ${channelLabel} 失败: ` + (sendResult.error || '未知错误'),
@@ -2584,7 +2609,8 @@ router.post('/:id/messages', async (req, res) => {
           translation,
           accountId: actualOutboundAccountId,
           channelMsgId: sendResult.channelMsgId ? String(sendResult.channelMsgId) : null,
-          sendStatus: 'failed'
+          sendStatus: sendResult.status === 'unknown' ? 'unknown' : 'failed',
+          sendError: sendResult.error || sendResult.errorMessage || '平台未确认发送'
         }
       })
     }
@@ -2598,7 +2624,7 @@ router.post('/:id/messages', async (req, res) => {
         translation,
         accountId: actualOutboundAccountId,
         channelMsgId: sendResult.channelMsgId ? String(sendResult.channelMsgId) : null,
-        sendStatus: sendResult.status === 'accepted' ? 'received' : (sendResult.success ? 'sent' : 'failed'),
+        sendStatus: sendResult.status === 'unknown' ? 'unknown' : sendResult.status === 'accepted' ? 'received' : (sendResult.success ? 'sent' : 'failed'),
         fallbackAccountId: sendResult.fallbackAccountId || null,
         originalAccountId: sendResult.originalAccountId || null,
         retryReason: sendResult.retryReason || null
@@ -2615,7 +2641,7 @@ router.post('/:id/assign', async (req, res) => {
   try {
     const { id } = req.params
     const { agent_id, previous_agent_id } = req.body
-    if (!['supervisor', 'admin'].includes(req.user.role)) {
+    if (!['admin'].includes(req.user.role)) {
       return res.status(403).json({ success: false, message: '无权分配会话' })
     }
     if (!await requireConversationAccess(req, res, id)) return
@@ -2685,7 +2711,7 @@ router.post('/batch-fetch-avatars', async (req, res) => {
   let ownsBatchJob = false
   let sharedLease = null
   try {
-    if (!['supervisor', 'admin'].includes(req.user.role)) {
+    if (!['admin'].includes(req.user.role)) {
       return res.status(403).json({ success: false, message: '无权执行全量头像同步' })
     }
     const { batchSize = 20, account_id: accountId } = req.body
@@ -2832,7 +2858,7 @@ router.post('/sync-all-history', async (req, res) => {
   let sharedLease = null
   let leaseTransferredToWorker = false
   try {
-    if (!['supervisor', 'admin'].includes(req.user.role)) {
+    if (!['admin'].includes(req.user.role)) {
       return res.status(403).json({ success: false, message: '无权执行全量历史同步' })
     }
     const input = req.body || {}
@@ -2847,9 +2873,6 @@ router.post('/sync-all-history', async (req, res) => {
     if (runningJob) {
       const canReadRunningJob = req.user.role === 'admin'
         || Number(runningJob.createdBy) === Number(req.user.id || req.user.userId)
-        || (req.user.role === 'supervisor'
-          && Number(runningJob.scopeAccountId) === Number(accountId)
-          && await hasPrivilegedAccountScope(req, runningJob.scopeAccountId))
       return res.json({
         success: true,
         message: '历史同步任务正在运行',
@@ -2904,11 +2927,7 @@ router.get('/sync-all-history/jobs/:jobId', async (req, res) => {
   const viewerId = req.user.id || req.user.userId
   const canReadOwn = Number(job?.createdBy) === Number(viewerId)
   const canReadAsAdmin = req.user.role === 'admin'
-  let canReadAsSupervisor = false
-  if (job && req.user.role === 'supervisor' && job.scopeAccountId) {
-    canReadAsSupervisor = await hasPrivilegedAccountScope(req, job.scopeAccountId)
-  }
-  if (!job || (!canReadOwn && !canReadAsAdmin && !canReadAsSupervisor)) {
+  if (!job || (!canReadOwn && !canReadAsAdmin)) {
     return res.status(404).json({ success: false, message: '同步任务不存在或已过期' })
   }
   res.json({ success: true, data: serializeSyncAllHistoryJob(job) })
@@ -2935,7 +2954,7 @@ router.post('/:id/claim', async (req, res) => {
       if (!Number.isInteger(requestedSeatId) || requestedSeatId <= 0) {
         return res.status(400).json({ success: false, message: '无效的目标坐席' })
       }
-      if (!['admin', 'supervisor'].includes(req.user.role)) {
+      if (!['admin'].includes(req.user.role)) {
         return res.status(403).json({ success: false, message: '无权分配坐席' })
       }
 
@@ -2955,7 +2974,9 @@ router.post('/:id/claim', async (req, res) => {
       return res.status(400).json({ success: false, message: '管理员请先选择要分配的坐席' })
     }
 
-    const result = await poolService.claimConversation(id, seatId, seatName, req.eventEmitter, claimOptions)
+    const result = requestedSeatId
+      ? await req.app.get('workspace').reserve(id, seatId, currentUserId)
+      : await req.app.get('workspace').takeOver(id, seatId)
 
     if (result.success) {
       res.json({ success: true, message: result.message || '抢单成功', data: result })
@@ -3007,7 +3028,7 @@ router.post('/:id/mark-long-term', async (req, res) => {
     if (!await requireConversationAccess(req, res, id)) return
 
     // 管理员可以指定绑定坐席；其他角色默认绑定操作者
-    const bindSeatId = (req.user.role === 'admin' || req.user.role === 'supervisor') && bind_seat_id
+    const bindSeatId = (req.user.role === 'admin') && bind_seat_id
       ? bind_seat_id
       : seatId
 
@@ -3120,17 +3141,17 @@ router.post('/:id/transfer-to-ai', async (req, res) => {
 // ========== 转交会话 ==========
 /**
  * POST /api/v1/conversations/:id/transfer
- * 转交会话给其他坐席（supervisor/admin 权限）
+ * 转交会话给其他坐席（admin 权限）
  */
 router.post('/:id/transfer', async (req, res) => {
   try {
-    if (!['supervisor', 'admin'].includes(req.user.role)) {
+    if (!['admin'].includes(req.user.role)) {
       return res.status(403).json({ success: false, message: '无权限转交会话' })
     }
 
     const { id } = req.params
     const { to_seat_id } = req.body
-    const fromSeatId = req.user.id || req.user.userId
+    let fromSeatId = req.user.id || req.user.userId
     const fromSeatName = req.user.username || `管理员${fromSeatId}`
 
     if (!to_seat_id) {
@@ -3138,17 +3159,15 @@ router.post('/:id/transfer', async (req, res) => {
     }
     if (!await requireConversationAccess(req, res, id)) return
 
+    const [owners] = await sequelize.query('SELECT claimed_by FROM conversations WHERE id = :id', { replacements: { id } })
+    fromSeatId = owners[0]?.claimed_by
     const targetUser = await findActiveAgent(to_seat_id, id)
     if (!targetUser) {
       return res.status(400).json({ success: false, message: '目标客服不存在或不可用' })
     }
     const toSeatName = targetUser.username
 
-    const result = await poolService.transferConversation(
-      id, fromSeatId, fromSeatName,
-      parseInt(to_seat_id), toSeatName,
-      req.eventEmitter
-    )
+    const result = await req.app.get('workspace').reserve(id, Number(to_seat_id), req.user.id)
 
     if (result.success) {
       res.json({ success: true, message: '转交成功', data: result })

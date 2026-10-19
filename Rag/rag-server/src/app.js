@@ -62,7 +62,6 @@ const warehouseRoutes = require('./modules/warehouse')
 const platformSkuMappingRoutes = require('./modules/platform-sku-mapping')
 const orderFulfillmentRoutes = require('./modules/order-fulfillment')
 const platformConnectionsRoutes = require('./modules/platform-connections')
-const messageReviewModule = require('./modules/message-review')
 const { systemAccountsRoutes } = require('./modules/system-accounts')
 const { sequelize } = require('./config/database')
 const { createChannelEventInboxRepository } = require('./modules/channel-events/channelEventInbox.repository')
@@ -140,6 +139,8 @@ const app = express()
 // 连接数据库
 connectDB().then(async () => {
   systemLogger.info('server.database_connected')
+  try { await app.get('localShopConnection').restore() }
+  catch { systemLogger.error('local_shop.restore_failed', { code: 'LOCAL_SHOP_RESTORE_FAILED' }) }
   if (process.env.NODE_ENV !== 'test') {
     try {
       initPinduoduoSyncWorker({ sequelize })
@@ -188,6 +189,8 @@ initAdapters()
 
 // 中间件
 app.use(cors())
+// The model playground accepts a small base64 image and bounded context.
+app.use('/api/v1/conversations/ai-provider/playground', express.json({ limit: '600kb', verify: captureRawBody }))
 app.use(express.json({ verify: captureRawBody }))
 app.use(express.urlencoded({ extended: true }))
 
@@ -246,7 +249,6 @@ app.set('asyncHandler', asyncHandler)
 
 // 将 eventEmitter 挂载到 app 上，供路由/模块使用
 app.set('eventEmitter', eventEmitter)
-messageReviewModule.setEventEmitter(eventEmitter)
 
 // RAG 模块路由（统一注册 chat/knowledge/langchain/upload/local/template/admin）
 app.use('/api', ragRoutes)
@@ -255,7 +257,7 @@ app.use('/api/auth', authRoutes)
 
 // 渠道 Webhook 路由（无需认证，由各渠道自行验证签名）
 app.use('/api/channel', channelWebhookRoutes)
-// 渠道账号管理路由（需 JWT 认证 + admin/supervisor 权限）
+// 渠道账号管理路由（需 JWT 认证 + admin 权限）
 app.use('/api/v1/channel-accounts', channelAccountRoutes)
 app.use('/api/v1/desktop-bridge', desktopBridgeRoutes)
 app.use('/api/v1/campaigns', campaignRoutes)
@@ -267,9 +269,9 @@ app.use('/api/v1/channel-events', createChannelEventsRouter({
 app.use('/api/v1/commerce-projections', createCommerceProjectionAdminRouter({
   repository: commerceProjectionAdminRepository
 }))
-// 坐席账号绑定管理路由（需 JWT 认证 + admin/supervisor 权限）
+// 坐席账号绑定管理路由（需 JWT 认证 + admin 权限）
 app.use('/api/v1/seat-bindings', seatBindingRoutes)
-// 聚合平台会话与消息路由（需 JWT 认证 + agent/supervisor/admin 权限）
+// 聚合平台会话与消息路由（需 JWT 认证 + agent/admin 权限）
 app.use('/api/v1/conversations', conversationRoutes)
 // WAHA Session 代理路由（需 JWT 认证 + admin 权限）
 app.use('/api/v1/waha', wahaProxyRoutes)
@@ -279,15 +281,15 @@ app.use('/api/v1/test-tool', testToolRoutes)
 app.use('/api/v1/system-logs', systemLogRoutes)
 // 本地测试运维控制（需 JWT 认证 + admin 权限；生产环境默认关闭）
 app.use('/api/v1/system-control', createSystemControlRouter())
-// 媒体文件管理路由（上传需 admin/supervisor/agent，删除需 admin/supervisor）
+// 媒体文件管理路由（上传需 admin/agent，删除需 admin）
 app.use('/api/v1/media-files', mediaFileRoutes)
-// 快捷指令管理路由（查询需 agent/supervisor/admin，管理需 admin/supervisor）
+// 快捷指令管理路由（查询需 agent/admin，管理需 admin）
 app.use('/api/v1/quick-replies', quickReplyRoutes)
-// 数据统计路由（agent 看自己，supervisor/admin 看全员）
+// 数据统计路由（agent 看自己，admin 看全员）
 app.use('/api/v1/statistics', statisticsRoutes)
 // 成交订单管理路由
 app.use('/api/v1/orders', orderRoutes)
-// 多渠道连接状态路由（agent/supervisor/admin 均可访问）
+// 多渠道连接状态路由（agent/admin 均可访问）
 app.use('/api/v1/channels/status', channelStatusRoutes)
 // 客户管理路由
 app.use('/api/v1/customers', customerRoutes)
@@ -297,7 +299,7 @@ app.use('/api/v1/warehouses', warehouseRoutes)
 app.use('/api/v1/platform-sku-mappings', platformSkuMappingRoutes)
 app.use('/api/v1/fulfillment', orderFulfillmentRoutes)
 app.use('/api/v1/platform-connections', platformConnectionsRoutes)
-app.use('/api/v1/message-reviews', messageReviewModule.reviewRoutes)
+app.use('/api/v1/local-workbench', require('./routes/localWorkbench'))
 app.use('/api/v1/system-accounts', systemAccountsRoutes)
 // 功能模块：PI 发票生成工具
 app.use('/api/v1/tools/invoices', toolsInvoiceRoutes)
@@ -400,6 +402,20 @@ const cloudGateway = initCloudGateway({
   }
 })
 app.set('cloudGateway', cloudGateway)
+const { LocalShopConnection } = require('./modules/cloud-gateway/localShopConnection')
+const { createCredentialCipher } = require('./modules/platform-connections/credentialCipher')
+let shopCredentialCipher
+function getShopCredentialCipher() {
+  if (!shopCredentialCipher) shopCredentialCipher = createCredentialCipher()
+  return shopCredentialCipher
+}
+const localShopConnection = new LocalShopConnection({ accounts: require('./models').ChannelAccount,
+  encrypt: value => getShopCredentialCipher().encrypt(value), decrypt: value => getShopCredentialCipher().decrypt(value), eventEmitter })
+localShopConnection.installDispatcher()
+// The manual-message route uses app.cloudGateway rather than runtime.getDispatcher.
+// Both must share the account-scoped dispatcher; otherwise shop sends fall through.
+cloudGateway.dispatcher = require('./modules/cloud-gateway/runtime').getDispatcher()
+app.set('localShopConnection', localShopConnection)
 
 // Desktop Bridge：默认关闭，显式启用才挂载 WSS 网关（/bridge/v1）。
 // inboundService 是缺失已久的一环——没有它，message.inbound 会被静默丢弃并返回成功 ack。
@@ -471,6 +487,19 @@ httpServer.listen(PORT, HOST, () => {
   console.log(`WebSocket 服务已就绪 (${lanHint.replace(/^http/, 'ws')})`)
 
   // 启动会话池定时器（AI自助池超时退出、待人工池超龄转公共池、公共池超龄归档）
+  const { createSeatAssignmentService } = require('./modules/conversation-pool/seatAssignment.service')
+  const seatAssignment = createSeatAssignmentService({ sequelize, eventEmitter,
+    poolService: require('./modules/conversation-pool/pool.service'),
+    connectedSeatIds: require('./modules/websocket/socketHandler').connectedSeatIds })
+  const { createWorkspaceService } = require('./modules/conversation-pool/workspace.service')
+  const workspace = createWorkspaceService({ sequelize, eventEmitter, clearPoolStats: require('./modules/conversation-pool/pool.service').clearPoolStatsCache, invalidateAi: async id => {
+    const queues = require('./queues')
+    await queues.markLatestAiReplyJob(id, 'cancelled:' + require('node:crypto').randomUUID())
+    await queues.removePendingAiReplyJobs(id, '人工接管或状态变更，旧AI回复作废')
+  } })
+  app.set('workspace', workspace)
+  app.set('seatAssignment', seatAssignment)
+  seatAssignment.start()
   startPoolTimers(eventEmitter)
   systemLogger.info('server.pool_timers_started')
   if (process.env.NODE_ENV !== 'test') {

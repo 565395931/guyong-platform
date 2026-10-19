@@ -4,6 +4,8 @@ out/
 
 # 桌面桥接节点凭据（含 enrollment token），绝不入库。
 .bridge-node.json
+.bridge-outbox.json
+.bridge-outbox.json.tmp
 
 # 本机运行产物
 __pycache__/

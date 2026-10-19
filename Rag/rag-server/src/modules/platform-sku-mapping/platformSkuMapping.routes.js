@@ -3,8 +3,8 @@
 const express = require('express')
 const { createAuthenticate } = require('../../middleware/authenticate')
 
-const canRead = user => ['agent', 'supervisor', 'admin'].includes(user?.role)
-const canManage = user => ['supervisor', 'admin'].includes(user?.role)
+const canRead = user => ['agent', 'admin'].includes(user?.role)
+const canManage = user => ['admin'].includes(user?.role)
 
 function requireRole(predicate) {
   return (req, res, next) => predicate(req.user)

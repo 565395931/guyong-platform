@@ -18,13 +18,13 @@ const routes = [
         path: 'platform-messages',
         name: 'PlatformMessages',
         component: () => import('@/views/PlatformMessages/PlatformMessagesView.vue'),
-        meta: { title: '平台消息', requiredRoles: ['agent', 'supervisor', 'admin'] }
+        meta: { title: '平台消息', requiredRoles: ['agent', 'admin'] }
       },
       {
         path: 'customer-service-accounts',
         name: 'CustomerServiceAccounts',
         component: () => import('@/views/Settings/CustomerServiceAccountsView.vue'),
-        meta: { title: '客服账号管理', requiredRoles: ['supervisor', 'admin'] }
+        meta: { title: '客服账号管理', requiredRoles: ['admin'] }
       },
       {
         path: 'workbench',
@@ -32,16 +32,28 @@ const routes = [
         redirect: redirectLegacyRoute
       },
       {
-        path: 'message-reviews',
-        name: 'MessageReviews',
-        component: () => import('@/views/MessageReviews/MessageReviewView.vue'),
-        meta: { title: '消息审核', requiredRoles: ['agent', 'supervisor', 'admin'] }
+        path: 'settings/general',
+        name: 'GeneralSettings',
+        component: () => import('@/views/Settings/GeneralSettingsView.vue'),
+        meta: { title: '通用设置', requiredRoles: ['admin'] }
+      },
+      {
+        path: 'settings/accounts',
+        name: 'SystemAccounts',
+        component: () => import('@/views/Settings/SystemAccountsView.vue'),
+        meta: { title: '系统账号管理', requiredRoles: ['admin'] }
       },
       {
         path: 'settings/ai',
         name: 'AiConfig',
         component: () => import('@/views/Settings/AiConfigView.vue'),
         meta: { title: 'AI 配置', requiredRoles: ['admin'] }
+      },
+      {
+        path: 'settings/model-test',
+        name: 'ModelTest',
+        component: () => import('@/views/Settings/ModelTestView.vue'),
+        meta: { title: '大模型测试', requiredRoles: ['admin'] }
       },
       {
         path: 'settings/video-data',
@@ -154,7 +166,7 @@ const routes = [
         path: 'warehouses',
         name: 'Warehouses',
         component: () => import('@/views/Warehouses/WarehouseView.vue'),
-        meta: { title: '仓库与库存', requiredRoles: ['supervisor', 'admin'] }
+        meta: { title: '仓库与库存', requiredRoles: ['admin'] }
       },
       {
         path: 'customers',

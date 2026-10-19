@@ -20,7 +20,7 @@ const { sanitizeCustomerOutputText } = require('../../services/languageGuard');
 const { normalizeKnowledgeMetadata } = require('./knowledgeScope');
 
 const DASHSCOPE_MODEL = process.env.DASHSCOPE_MODEL || 'qwen-plus';
-const JWT_SECRET = process.env.JWT_SECRET || 'rag_secret_key_2024_dev_only';
+const JWT_SECRET = process.env.JWT_SECRET;
 const uuidv4 = () => crypto.randomUUID();
 
 function optionalJwtUser(req) {
@@ -36,7 +36,7 @@ function optionalJwtUser(req) {
 function requireQaRecordRole(req, res, next) {
   const user = optionalJwtUser(req);
   if (!user) return res.status(401).json({ success: false, message: '未提供认证令牌' });
-  if (!['admin', 'supervisor'].includes(user.role)) {
+  if (!['admin'].includes(user.role)) {
     return res.status(403).json({ success: false, message: '无权限访问 QA 记录' });
   }
   req.user = user;
@@ -46,7 +46,7 @@ function requireQaRecordRole(req, res, next) {
 function requireKnowledgeManageRole(req, res, next) {
   const user = optionalJwtUser(req);
   if (!user) return res.status(401).json({ success: false, message: '未提供认证令牌' });
-  if (!['admin', 'supervisor'].includes(user.role)) {
+  if (!['admin'].includes(user.role)) {
     return res.status(403).json({ success: false, message: '无权限下载知识库文档' });
   }
   req.user = user;
@@ -900,10 +900,10 @@ const suggestionStreamHandler = async (req, res) => {
     console.log('[Suggestion] 客户语言检测:', customerLang);
 
     // 2. 获取会话上下文（从 plat_messages 手动查询）
-    const rawLlmContextCount = await configService.getConfig('llm_context_message_count');
+    const rawLlmContextCount = (await require('../ai-provider/providerService').getProviderService().getReplySettings()).contextMessageCount;
     const parsedLlmContextCount = parseInt(rawLlmContextCount, 10);
     const llmContextCount = Number.isFinite(parsedLlmContextCount)
-      ? Math.max(0, Math.min(parsedLlmContextCount, 50))
+      ? Math.max(0, Math.min(parsedLlmContextCount, 100))
       : 20;
     const history = await messagingService.getConversationContext(msg.conversation_id, llmContextCount);
     console.log('[Suggestion] 会话上下文消息数:', history.length, '(配置:', llmContextCount, ')');
@@ -974,16 +974,18 @@ const suggestionStreamHandler = async (req, res) => {
     let fullResponse = '';
     let chineseVersion = '';
     let genError = null;
+    let replyDecision = null;
 
     await suggestionLimiter(async () => {
       const generator = langchainService.generateRecommendationStream(
         llmInputText,
         history,
         contextDocs,
-        { model: useModel, temperature: temperature ?? 0.7, maxContextTokens: 4000, customerLang }
+        { model: useModel, temperature: temperature ?? 0.7, maxContextTokens: 4000, customerLang, channel:msg.channel, historyIncludesCurrent:true }
       );
 
       for await (const chunk of generator) {
+        if (chunk.type === 'decision') replyDecision = { action:chunk.action,reason:chunk.reason };
         if (chunk.type === 'error') {
           genError = chunk;
           return;
@@ -1045,6 +1047,7 @@ const suggestionStreamHandler = async (req, res) => {
       suggestion: fullResponse,
       suggestionCn: chineseVersion || null,
       customerLang,
+      decision: replyDecision,
       regenerated: regenerate
     };
     res.write(`event: done\ndata: ${JSON.stringify(donePayload)}\n\n`);

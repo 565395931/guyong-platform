@@ -23,7 +23,7 @@ function resolvePublicRegistrationEnabled(environment = process.env) {
 }
 
 function resolveAuthMode(environment = process.env) {
-  return String(environment.AUTH_MODE || 'single_owner').trim().toLowerCase() === 'team'
+  return String(environment.AUTH_MODE || 'team').trim().toLowerCase() === 'team'
     ? 'team'
     : 'single_owner'
 }
@@ -130,6 +130,7 @@ function createAuthRouter({
   captchaEnabled = resolveCaptchaEnabled(),
   publicRegistrationEnabled = resolvePublicRegistrationEnabled(),
   authMode = resolveAuthMode(),
+  onLogin = async () => {},
   createCaptcha,
   createCaptchaChallenge: injectedCreateCaptcha
 } = {}) {
@@ -321,6 +322,8 @@ function createAuthRouter({
         })
       }
 
+      await onLogin(user)
+
       const token = jwt.sign(
         { id: user.id, username: user.username, role: user.role },
         jwtSecret,
@@ -487,7 +490,12 @@ function createAuthRouter({
   return router
 }
 
-const authRouter = createAuthRouter()
+const authRouter = createAuthRouter({ onLogin: async user => {
+  if (user.role !== 'agent') return
+  const { sequelize } = require('../config/database')
+  await sequelize.query('UPDATE seat_status SET manual_offline = 0 WHERE user_id = :id', { replacements: { id: user.id } })
+  await require('../modules/conversation-pool/pool.service').updateSeatStatus(user.id, 'online')
+} })
 
 module.exports = authRouter
 module.exports.createCaptchaChallenge = createCaptchaChallenge

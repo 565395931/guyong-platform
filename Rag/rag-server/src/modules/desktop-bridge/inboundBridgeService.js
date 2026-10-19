@@ -1,4 +1,4 @@
-const { randomUUID } = require('node:crypto')
+const { randomUUID, createHash } = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const { QueryTypes } = require('sequelize')
@@ -9,6 +9,11 @@ const BRIDGE_SOURCE = 'desktop_bridge'
 const AVATAR_DIR = path.join(__dirname, '..', '..', 'public', 'avatars')
 const MEDIA_DIR = path.join(__dirname, '..', '..', 'public', 'media-files')
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024
+
+function bridgeMediaFilename(kind, { channel, accountId, identity }) {
+  const digest = createHash('sha256').update(JSON.stringify([channel, Number(accountId), String(identity)])).digest('hex')
+  return `bridge-${kind}-${digest}.png`
+}
 
 function writeBase64Png({ dir, filename, base64Png, publicPrefix }) {
   if (!base64Png) return null
@@ -55,18 +60,7 @@ function messagingService() {
 function createInboundBridgeService({ sequelize, eventEmitter, logger = console } = {}) {
   if (!sequelize) throw new Error('sequelize is required')
 
-  /**
-   * 消息在页面上的真实时间，格式化为 MySQL 本地时间字符串。
-   *
-   * ⚠️ 两个坑都在这里避开：
-   * 1. **不能用入库时刻（NOW()）**：界面按 created_at 排序，而一次采集会把整屏消息
-   *    在同一秒内插进去，同秒只能按随机 UUID 兜底 → 顺序全乱。
-   * 2. **不要直接传 Date 对象**给 replacements：入站走 UPDATE、出站走 INSERT，
-   *    两条路径对 Date 的时区处理不一致，实测入站被存成了 UTC（16:35+08:00 存成 08:35），
-   *    正好差 8 小时。自己格式化成本地时间字符串就没有歧义了。
-   *
-   * batchIndex 加到毫秒上：保留真实时间的同时，让同秒内的多条严格按页面顺序排列。
-   */
+  /** 页面时间统一转为 UTC，与数据库和消息主链路一致；批次序号补入毫秒。 */
   function resolveMessageTime(platformMessage) {
     const raw = platformMessage.clientTimestamp
     if (!raw) return null
@@ -77,10 +71,8 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
     const index = Number(meta.batchIndex)
     const when = new Date(base.getTime() + (Number.isFinite(index) && index > 0 ? index : 0))
 
-    const pad = (value, width = 2) => String(value).padStart(width, '0')
-    return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())} `
-      + `${pad(when.getHours())}:${pad(when.getMinutes())}:${pad(when.getSeconds())}`
-      + `.${pad(when.getMilliseconds(), 3)}`
+    // database.js 和消息主链路统一使用 UTC；不能把本地时间覆盖回 created_at。
+    return when.toISOString().slice(0, 23).replace('T', ' ')
   }
 
   /**
@@ -93,11 +85,11 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
    * 注意：必须定义在工厂**内部**——放到模块级会拿不到闭包里的 sequelize
    * （踩过：报 "sequelize is not defined"，文件写成功但数据库没回填）。
    */
-  async function saveAvatar({ customerKey, base64Png }) {
+  async function saveAvatar({ customerKey, base64Png, accountId, channel }) {
     if (!customerKey || !base64Png) return null
     const url = writeBase64Png({
       dir: AVATAR_DIR,
-      filename: `feige-${customerKey}.png`,
+      filename: bridgeMediaFilename('avatar', { channel, accountId, identity: customerKey }),
       base64Png,
       publicPrefix: '/api/avatars'
     })
@@ -105,8 +97,8 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
 
     await sequelize.query(
       `UPDATE conversations SET user_avatar = :url, updated_at = NOW(3)
-        WHERE channel = 'douyin' AND user_id = :customerKey`,
-      { replacements: { url, customerKey } }
+        WHERE channel = :channel AND account_id = :accountId AND user_id = :customerKey`,
+      { replacements: { url, customerKey, channel, accountId } }
     )
     return url
   }
@@ -118,11 +110,11 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
    * 落盘后把 URL 写进消息 content —— 前端 MessageBubble 读 content.fileUrl
    * 且 message_type='image' 时才会渲染成图片。
    */
-  async function saveSticker({ channelMessageId, base64Png }) {
+  async function saveSticker({ channelMessageId, base64Png, accountId, channel }) {
     if (!channelMessageId || !base64Png) return null
     return writeBase64Png({
       dir: MEDIA_DIR,
-      filename: `feige-sticker-${String(channelMessageId).slice(0, 24)}.png`,
+      filename: bridgeMediaFilename('sticker', { channel, accountId, identity: channelMessageId }),
       base64Png,
       publicPrefix: '/api/media-files/static'
     })
@@ -134,9 +126,11 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
     }
     const rows = await sequelize.query(
       `SELECT a.id, a.channel, a.status, a.account_name,
-              b.enabled AS binding_enabled, b.adapter_id, b.preferred_node_id
+              b.enabled AS binding_enabled, b.adapter_id, b.preferred_node_id,
+              l.node_id AS lease_node_id, l.expires_at AS lease_expires_at
          FROM channel_accounts a
          LEFT JOIN desktop_bridge_bindings b ON b.channel_account_id = a.id
+         LEFT JOIN desktop_bridge_leases l ON l.channel_account_id = a.id
         WHERE a.id = :accountId`,
       { replacements: { accountId: Number(accountId) }, type: QueryTypes.SELECT }
     )
@@ -148,6 +142,10 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
     if (account.preferred_node_id && nodeId
         && Number(account.preferred_node_id) !== Number(nodeId)) {
       return { ok: false, status: 'rejected', code: 'NODE_NOT_BOUND' }
+    }
+    if (!nodeId || Number(account.lease_node_id) !== Number(nodeId) ||
+        !(new Date(account.lease_expires_at).getTime() > Date.now())) {
+      return { ok: false, status: 'rejected', code: 'NO_ACTIVE_LEASE' }
     }
     return { ok: true, account }
   }
@@ -269,6 +267,7 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
           SET pool_type = 'ai_self', conv_status = 'ai_serving', updated_at = NOW(3)
         WHERE id = :conversationId
           AND claimed_by IS NULL
+          AND pool_type = 'ai_self'
           AND conv_status = 'pending_claim'`,
       { replacements: { conversationId } }
     )
@@ -293,6 +292,9 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
         return { status: resolved.status, errorCode: resolved.code, message: resolved.code }
       }
       account = resolved.account
+      if (account.channel !== payload.channel) {
+        return { status: 'rejected', errorCode: 'CHANNEL_ACCOUNT_MISMATCH', message: 'Message channel does not match bound account' }
+      }
     } catch (error) {
       logger.error('[InboundBridge] 账号校验失败:', error.message)
       return { status: 'retryable_error', errorCode: 'ACCOUNT_LOOKUP_FAILED', message: error.message }
@@ -309,6 +311,7 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
     // 这样 processIncomingMessage 存下去的就是前端能渲染的地址。
     if (stickerPng) {
       const url = await saveSticker({
+        accountId: platformMessage.accountId, channel: platformMessage.channel,
         channelMessageId: platformMessage.channelMessageId,
         base64Png: stickerPng
       }).catch(error => {
@@ -338,9 +341,8 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
       if (platformMessage.conversationId) await ensureAiPool(platformMessage.conversationId)
 
       // 把 created_at 校正成页面上的真实时间。
-      // 为什么不能依赖 processIncomingMessage 的返回值：它自己会写 created_at，
-      // 而且是按 UTC 存的（实测 16:35+08:00 被存成 08:35，差 8 小时），
-      // 但它的返回值不保证带 messageId，所以这里按 channelMessageId 定位。
+      // 为什么不能依赖 processIncomingMessage 的返回值：它自己按 UTC 写 created_at，
+      // 此处保持 UTC 并补齐批次毫秒序号；按 channelMessageId 定位。
       const when = resolveMessageTime(platformMessage)
       if (when && platformMessage.channelMessageId) {
         await sequelize.query(
@@ -358,7 +360,8 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
         ).catch(error => logger.warn('[InboundBridge] 校正消息时间失败:', error.message))
       }
       if (avatarPng) {
-        await saveAvatar({ customerKey: platformMessage.userId, base64Png: avatarPng })
+        await saveAvatar({ customerKey: platformMessage.userId, base64Png: avatarPng,
+          accountId: platformMessage.accountId, channel: platformMessage.channel })
           .catch(error => logger.warn('[InboundBridge] 头像保存失败:', error.message))
       }
       return {
@@ -379,7 +382,7 @@ function createInboundBridgeService({ sequelize, eventEmitter, logger = console 
     }
   }
 
-  return { handle, toPlatformMessage, resolveAccount, persistOutbound, ensureAiPool }
+  return { handle, toPlatformMessage, resolveAccount, persistOutbound, ensureAiPool, resolveMessageTime }
 }
 
-module.exports = { createInboundBridgeService, BRIDGE_SOURCE }
+module.exports = { createInboundBridgeService, BRIDGE_SOURCE, bridgeMediaFilename }

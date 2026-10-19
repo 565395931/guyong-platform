@@ -10,7 +10,7 @@ const service = createSystemAccountsService({
   hashPassword: password => bcrypt.hash(password, 10)
 })
 
-const accountMode = String(process.env.AUTH_MODE || 'single_owner').trim().toLowerCase() === 'team'
+const accountMode = String(process.env.AUTH_MODE || 'team').trim().toLowerCase() === 'team'
   ? 'team'
   : 'single_owner'
 

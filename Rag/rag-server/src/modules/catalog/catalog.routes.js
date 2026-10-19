@@ -3,8 +3,8 @@ const jwt = require('jsonwebtoken')
 const multer = require('multer')
 const path = require('path')
 
-const canReadCatalog = user => ['agent', 'supervisor', 'admin'].includes(user?.role)
-const canManageCatalog = user => ['supervisor', 'admin'].includes(user?.role)
+const canReadCatalog = user => ['agent', 'admin'].includes(user?.role)
+const canManageCatalog = user => ['admin'].includes(user?.role)
 
 function statusForError(error) {
   const message = String(error?.message || '')

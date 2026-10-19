@@ -80,7 +80,7 @@ const activeTab = ref('products')
 const importVisible = ref(false)
 const reloadKey = ref(0)
 
-const canManage = computed(() => ['admin', 'supervisor'].includes(userStore.userInfo?.role))
+const canManage = computed(() => ['admin'].includes(userStore.userInfo?.role))
 const selectedVersion = computed(() => versions.value.find(item => item.id === versionId.value) || null)
 
 const statusLabel = status => ({ draft: '草稿', published: '已发布', retired: '历史版本' }[status] || status)

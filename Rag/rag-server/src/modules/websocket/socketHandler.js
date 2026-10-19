@@ -13,9 +13,9 @@ if (!JWT_SECRET) {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('[WebSocket] 生产环境必须配置 JWT_SECRET 环境变量')
   }
-  console.warn('[WebSocket] 警告：未配置 JWT_SECRET 环境变量，使用开发默认密钥（生产环境不可用）')
+  console.warn('[WebSocket] 警告：未配置 JWT_SECRET 环境变量，连接认证不可用')
 }
-const EFFECTIVE_JWT_SECRET = JWT_SECRET || 'rag_secret_key_2024_dev_only'
+const EFFECTIVE_JWT_SECRET = JWT_SECRET
 
 // 单例 Socket.IO 实例
 let io = null
@@ -25,11 +25,11 @@ const seatOfflineTimers = new Map()
 const seatOfflineGraceMs = Number.parseInt(process.env.SEAT_OFFLINE_GRACE_MS || '30000', 10)
 
 function isSeatRole(role) {
-  return role === 'agent' || role === 'supervisor' || role === 'admin'
+  return role === 'agent' || role === 'admin'
 }
 
 function shouldAutoReleaseOnOffline(role) {
-  return role === 'agent' || role === 'supervisor'
+  return role === 'agent'
 }
 
 function addSeatSocket(userId, socketId) {
@@ -81,7 +81,7 @@ function initializeSocket(httpServer, eventEmitter) {
   })
 
   // ========== 连接认证中间件 ==========
-  io.use((socket, next) => {
+  io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth?.token
 
@@ -98,7 +98,11 @@ function initializeSocket(httpServer, eventEmitter) {
       // 将用户信息挂载到 socket 上
       socket.userId = decoded.userId || decoded.id
       socket.username = decoded.username
-      socket.role = decoded.role
+      const User = require('../../models/User')
+      const user = await User.findByPk(socket.userId, { attributes: ['id', 'username', 'role', 'status'] })
+      if (!user || user.status !== 'active' || !['admin', 'agent'].includes(user.role)) return next(new Error('账号不可用'))
+      socket.role = user.role
+      socket.username = user.username
 
       next()
     } catch (err) {
@@ -115,44 +119,37 @@ function initializeSocket(httpServer, eventEmitter) {
     const userRoom = ROOMS.userRoom(socket.userId)
     socket.join(userRoom)
 
-    // 如果是坐席或主管，也加入公共池房间（用于接收未分配会话的消息）
+    // 如果是坐席，也加入公共池房间（用于接收未分配会话的消息）
     if (isSeatRole(socket.role)) {
       addSeatSocket(socket.userId, socket.id)
 
-      socket.join(ROOMS.PUBLIC_POOL)
-      socket.join(ROOMS.AI_SELF_POOL)
-      socket.join(ROOMS.PENDING_HUMAN_POOL)
+      if (socket.role === 'admin') {
+        socket.join(ROOMS.PUBLIC_POOL)
+        socket.join(ROOMS.AI_SELF_POOL)
+        socket.join(ROOMS.PENDING_HUMAN_POOL)
+      }
       console.log(`[WebSocket] ${socket.username} 已加入公共池/AI自助池/待人工池房间`)
 
-      // 更新坐席在线状态
-      poolService.updateSeatStatus(socket.userId, SEAT_STATUS.ONLINE).catch(err =>
-        console.error('[WebSocket] 更新坐席状态失败:', err.message)
-      )
+      // Reconnecting must preserve an explicit offline choice.
+      if (getSeatSocketCount(socket.userId) === 1) {
+        ;(async () => {
+          const { sequelize } = require('../../config/database')
+          const [rows] = await sequelize.query('SELECT manual_offline, status FROM seat_status WHERE user_id = :id', { replacements: { id: socket.userId } })
+          await poolService.updateSeatStatus(socket.userId, rows[0]?.manual_offline ? SEAT_STATUS.OFFLINE : rows[0]?.status === 'busy' ? SEAT_STATUS.BUSY : SEAT_STATUS.ONLINE)
+        })().catch(error => console.error('[WebSocket] 更新坐席状态失败:', error.message))
+      }
     }
+
+    syncSeatAccountRooms(socket.userId).catch(error=>console.error('[WebSocket] 更新账号房间失败:',error.message))
 
     // 客户端请求加入指定会话房间
     socket.on('join_conversation', async (conversationId) => {
       try {
-        // 权限校验：admin 可访问所有会话，agent/supervisor 只能访问分配给自己的会话
-        if (socket.role !== 'admin') {
-          const { sequelize } = require('../../config/database')
-          const [rows] = await sequelize.query(
-            `SELECT claimed_by, pool_type FROM conversations WHERE id = :conversationId LIMIT 1`,
-            { replacements: { conversationId } }
-          )
-
-          if (rows.length === 0) {
-            socket.emit('error', { message: `会话不存在: ${conversationId}` })
-            return
-          }
-
-          // 会话未认领坐席时，允许 agent/supervisor 加入（公共池/待人工池接待场景）
-          // 已认领则只允许认领的坐席加入（admin 除外）
-          if (rows[0].claimed_by && rows[0].claimed_by !== socket.userId) {
-            console.warn(`[WebSocket] ${socket.username} 无权访问会话 ${conversationId}（已被其他坐席认领）`)
-            socket.emit('error', { message: '无权访问该会话' })
-            return
-          }
+        // 权限校验：admin 可访问所有会话，agent 只能访问分配给自己的会话
+        const { createWorkspaceService } = require('../conversation-pool/workspace.service')
+        const { sequelize } = require('../../config/database')
+        if (!await createWorkspaceService({sequelize}).canView(socket.userId,socket.role,conversationId)) {
+          socket.emit('error',{message:'无权访问该会话'}); return
         }
 
         const roomName = `conversation:${conversationId}`
@@ -172,13 +169,13 @@ function initializeSocket(httpServer, eventEmitter) {
     })
 
     // 客户端标记已读
-    socket.on('mark_read', (data) => {
+    socket.on('mark_read', async (data) => {
       // 更新会话未读数
       if (data?.conversationId) {
         const { sequelize } = require('../../config/database')
         sequelize.query(
-          `UPDATE conversations SET unread_count = 0 WHERE id = :id`,
-          { replacements: { id: data.conversationId } }
+          `UPDATE conversations c SET unread_count = 0 WHERE id = :id AND (:isAdmin = 1 OR ${require('../conversation-pool/workspacePolicy').agentVisibility('c','seatId')})`,
+          { replacements: { id: data.conversationId, isAdmin: socket.role === 'admin' ? 1 : 0, seatId: socket.userId } }
         ).catch(err => console.error('[WebSocket] 标记已读失败:', err.message))
       }
       console.log(`[WebSocket] ${socket.username} 标记已读:`, data)
@@ -208,6 +205,7 @@ function initializeSocket(httpServer, eventEmitter) {
           }
 
           try {
+            await poolService.updateSeatStatus(socket.userId, SEAT_STATUS.OFFLINE)
             if (eventEmitter) {
               const released = await poolService.releaseOnSeatOffline(socket.userId, eventEmitter)
               if (released > 0) {
@@ -242,7 +240,25 @@ function getIO() {
   return io
 }
 
+async function syncSeatAccountRooms(userId, { notify = false } = {}) {
+  if (!io) return
+  const { sequelize } = require('../../config/database')
+  const [bindings] = await sequelize.query("SELECT account_id FROM seat_account_bindings WHERE seat_id=:userId AND status='active'", {replacements:{userId}})
+  const sockets = await io.in(ROOMS.userRoom(userId)).fetchSockets()
+  for (const socket of sockets) {
+    if (socket.role !== 'agent') continue
+    for (const room of socket.rooms) if (room.startsWith('account:') && room.endsWith(':ai')) await socket.leave(room)
+    for (const binding of bindings) await socket.join(`account:${binding.account_id}:ai`)
+    const workspace = require('../conversation-pool/workspace.service').createWorkspaceService({sequelize})
+    for (const room of socket.rooms) if (room.startsWith('conversation:')
+      && !await workspace.canView(userId,'agent',room.slice('conversation:'.length))) await socket.leave(room)
+    if (notify) socket.emit('bindings_changed',{})
+  }
+}
+
 module.exports = {
   initializeSocket,
-  getIO
+  getIO,
+  syncSeatAccountRooms,
+  connectedSeatIds: () => Array.from(seatSockets.keys(), Number)
 }

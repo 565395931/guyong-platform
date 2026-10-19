@@ -31,7 +31,7 @@ request.interceptors.response.use(
     }
     const res = response.data
     if (res.success === false) {
-      ElMessage.error(res.message || '请求失败')
+      if (!response.config.silent) ElMessage.error(res.message || '请求失败')
       return Promise.reject(new Error(res.message || '请求失败'))
     }
     return res
@@ -48,7 +48,7 @@ request.interceptors.response.use(
       if (status === 401 && !authPageOwnsError) {
         ElMessage.error('登录已过期，请重新登录')
         redirectToLogin()
-      } else if (!authPageOwnsError) {
+      } else if (!authPageOwnsError && !error.config?.silent) {
         ElMessage.error(data?.message || `请求错误 (${status})`)
       }
     } else if (!authPageOwnsError) {

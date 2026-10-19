@@ -38,7 +38,16 @@ function createSystemAccountsRouter({ service, authenticate, jwtSecret, accountM
     if (accountMode === 'team') return next()
     res.status(403).json({ success: false, message: '当前为单账号模式，系统账号管理未启用' })
   })
-  router.get('/', respond(req => service.list(req.query)))
+  router.get('/', respond(async req => {
+    const users = await service.list(req.query)
+    if (!req.app.get('seatAssignment')) return users
+    const live = require('../websocket/socketHandler').connectedSeatIds()
+    const { effectiveSeatStatus } = require('../conversation-pool/seatAssignment.service')
+    return users.map(user => ({ ...user, currentLoad: Number(user.currentLoad || 0),
+      seatStatus: user.role === 'agent'
+        ? effectiveSeatStatus(live.includes(Number(user.id)) ? user.availability || 'offline' : 'offline', user.currentLoad)
+        : null }))
+  }))
   router.post('/', respond(req => service.create(req.body)))
   router.patch('/:id', respond(req => service.update(req.params.id, req.body, { actorId: req.user.id })))
   router.post('/:id/reset-password', respond(req => service.resetPassword(req.params.id, req.body)))

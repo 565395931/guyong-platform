@@ -6,15 +6,15 @@ const source = readFileSync(__dirname + '/conversations.js', 'utf8')
 
 test('conversation routes use shared authentication without accepting a fallback secret', () => {
   assert.match(source, /createAuthenticate/)
-  assert.doesNotMatch(source, /EFFECTIVE_JWT_SECRET|rag_secret_key_2024_dev_only/)
+  assert.doesNotMatch(source, /EFFECTIVE_JWT_SECRET|_dev_only/)
 })
 
 test('ordinary agents cannot reassign conversations through legacy update and assign routes', () => {
   const updateBlock = source.match(/router\.patch\('\/:id',[\s\S]*?router\.post\('\/:id\/infer-nationality'/)?.[0] || ''
   const assignBlock = source.match(/router\.post\('\/:id\/assign',[\s\S]*?router\.post\('\/:id\/fetch-avatar'/)?.[0] || ''
 
-  assert.match(updateBlock, /agent_id !== undefined[\s\S]*supervisor[\s\S]*admin/)
-  assert.match(assignBlock, /supervisor[\s\S]*admin/)
+  assert.match(updateBlock, /agent_id !== undefined[\s\S]*admin/)
+  assert.match(assignBlock, /admin/)
   assert.match(updateBlock, /findActiveAgent/)
   assert.match(assignBlock, /findActiveAgent/)
 })
@@ -25,11 +25,13 @@ test('conversation object authorization does not reveal foreign object existence
   assert.match(accessBlock, /status\(404\)/)
 })
 
-test('ordinary-agent object access is limited to conversations owned by that agent', () => {
-  const visibilityBlock = source.match(/function addAgentVisibilityCondition[\s\S]*?async function checkConversationAccess/)?.[0] || ''
-  assert.match(visibilityBlock, /claimed_by = :visibilityUserId/)
-  assert.match(visibilityBlock, /agent_id = :visibilityUserId/)
-  assert.doesNotMatch(visibilityBlock, /pool_type IN/)
+test('ordinary agents use shared bound-account AI/history/assignment visibility', () => {
+ const visibilityBlock=source.match(/function addAgentVisibilityCondition[\s\S]*?async function checkConversationAccess/)?.[0]||''
+ assert.match(visibilityBlock,/workspacePolicy/)
+ const {agentVisibility}=require('../modules/conversation-pool/workspacePolicy')
+ assert.match(agentVisibility(),/seat_account_bindings/)
+ assert.match(agentVisibility(),/pool_type = 'ai_self'/)
+ assert.match(agentVisibility(),/conversation_seat_history/)
 })
 
 test('transfer validates an active target agent before changing ownership', () => {
@@ -45,8 +47,8 @@ test('global side-effect routes require privileged authorization', () => {
     ? source.slice(syncAllStart, syncAllEnd)
     : ''
 
-  assert.match(batchAvatarBlock, /supervisor[\s\S]*admin/)
-  assert.match(syncAllBlock, /supervisor[\s\S]*admin/)
+  assert.match(batchAvatarBlock, /admin/)
+  assert.match(syncAllBlock, /admin/)
   assert.match(batchAvatarBlock, /requirePrivilegedAccountScope/)
   assert.match(syncAllBlock, /requirePrivilegedAccountScope/)
   assert.match(batchAvatarBlock, /enforcePrivilegedActionRateLimit/)

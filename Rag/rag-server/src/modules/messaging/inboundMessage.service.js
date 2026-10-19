@@ -1,10 +1,9 @@
-const { POOL_TYPE } = require('../conversation-pool/constants')
+const { isAiReplyEligible } = require('../conversation-pool/aiReplyPolicy')
 const { INTERNAL_EVENTS } = require('../websocket/events')
 
 function resolveDependencies(overrides) {
   const queueModule = overrides.queueModule || require('../../queues')
   return {
-    reviewService: overrides.reviewService || require('../message-review').reviewService,
     poolService: overrides.poolService || require('../conversation-pool/pool.service'),
     configService: overrides.configService || require('../../services/configService'),
     systemLogger: overrides.systemLogger || require('../../utils/systemLogger'),
@@ -19,31 +18,16 @@ function createInboundMessagePostProcessor(overrides = {}) {
 
   return async function processInboundMessageAfterStore(message, eventEmitter, context = {}) {
     dependencies ||= resolveDependencies(overrides)
-    const { reviewService, poolService, configService, systemLogger, queueModule, now, random } = dependencies
+    const { poolService, configService, systemLogger, queueModule, now, random } = dependencies
     const conversationId = message?.conversationId
     if (!conversationId) throw new Error('Inbound message is missing conversationId after persistence')
 
-    const review = await reviewService.reviewInbound(message, context)
-    if (review.action === 'review') {
-      try {
-        await queueModule.removePendingAiReplyJobs(conversationId, 'message awaiting human review')
-      } catch (error) {
-        systemLogger.error?.('message.review_ai_job_cleanup_failed', {
-          conversationId,
-          reviewId: review.item.id,
-          error: error.message
-        })
-      }
-      return {
-        reviewQueued: true,
-        reviewId: review.item.id,
-        aiReplyQueued: false,
-        jobMarker: null
-      }
-    }
-
     const routeInfo = await poolService.routeIncomingMessage(conversationId, message, eventEmitter)
-    if (routeInfo.poolType !== POOL_TYPE.AI_SELF) {
+    if (context.allowAutoReply === false) {
+      await queueModule.removePendingAiReplyJobs(conversationId, 'cloud shop manual-only connection')
+      return { routeInfo, aiReplyQueued: false, jobMarker: null, manualOnly: true }
+    }
+    if (!isAiReplyEligible(routeInfo)) {
       return { routeInfo, aiReplyQueued: false, jobMarker: null }
     }
 
@@ -57,6 +41,7 @@ function createInboundMessagePostProcessor(overrides = {}) {
       conversationId,
       message,
       enqueuedAt,
+      aiEpoch: routeInfo?.aiEpoch ?? routeInfo?.ai_epoch ?? 0,
       jobMarker,
       eventId: context.eventId || null,
       source: context.source || 'unknown'

@@ -3,15 +3,32 @@ const path = require('path')
 
 function emptyData() {
   return {
-    version: 1,
+    version: 2,
     tenants: [],
     users: [],
     devices: [],
+    modelKeys: [],
+    localPairings: [],
+    localClients: [],
     plans: [],
     subscriptions: [],
     creditEntries: [],
     reservations: [],
+    moneyEntries: [],
+    packageOrders: [],
+    modelCalls: [],
+    modelCallTotals: [],
+    pendingModelCalls: [],
+    billingConfigs: [],
     wecomInstallations: [],
+    shopInstallations: [],
+    shopDrafts: [],
+    shopSends: [],
+    modelConfigs: [],
+    conversations: [],
+    customerProfiles: [],
+    messages: [],
+    wecomProviderState: {},
     auditEntries: []
   }
 }
@@ -30,6 +47,7 @@ class FileSaasStore {
   }
 
   _write(data) {
+    require('./modelCallRetention').compactModelCalls(data)
     const temporary = `${this.filePath}.${process.pid}.tmp`
     fs.writeFileSync(temporary, JSON.stringify(data, null, 2), { encoding: 'utf8', mode: 0o600 })
     fs.renameSync(temporary, this.filePath)

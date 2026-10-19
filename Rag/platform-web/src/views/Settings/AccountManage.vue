@@ -1,5 +1,6 @@
 <template>
   <div :class="['account-manage-view', { 'account-manage-view--embedded': props.embedded }]">
+    <AccountSeatDialog v-model="seatDialogVisible" :accounts="accountList" :initial-account-id="seatAccountId" />
     <!-- 渠道连不上：整条横幅闪红光。
          注意放在 embedded 判断之外——工作台里的账号管理是**嵌入**渲染的
          （account-manage-view--embedded），只写在非嵌入的筛选条里就等于不显示。 -->
@@ -55,6 +56,7 @@
       <p>{{ activeCapabilities.limitation }}</p>
     </section>
 
+    <RemoteShopConnection v-if="filterChannel === 'wechat_shop' || props.channelCode === 'wechat_shop'" @changed="loadAccounts" />
     <div class="account-manage-view__table" v-loading="loading">
       <el-table v-if="accountList.length" :data="accountList" row-key="id" stripe>
         <el-table-column label="账号" min-width="190">
@@ -82,15 +84,15 @@
 
         <el-table-column label="对话接入" width="120">
           <template #default="{ row }">
-            <el-tag size="small" effect="plain" :type="getAccountConnectionMode(row.channel) === 'desktop_bridge_required' ? 'warning' : 'success'">
-              {{ connectionModeLabel(row.channel) }}
+            <el-tag size="small" effect="plain" :type="row.adapter_type !== 'wechat_shop_cloud' && getAccountConnectionMode(row.channel) === 'desktop_bridge_required' ? 'warning' : 'success'">
+              {{ row.adapter_type === 'wechat_shop_cloud' ? '远端中转' : connectionModeLabel(row.channel) }}
             </el-tag>
           </template>
         </el-table-column>
 
         <el-table-column label="桌面节点" width="120">
           <template #default="{ row }">
-            <span v-if="getAccountConnectionMode(row.channel) === 'desktop_bridge_required'" class="account-meta">
+            <span v-if="row.adapter_type !== 'wechat_shop_cloud' && getAccountConnectionMode(row.channel) === 'desktop_bridge_required'" class="account-meta">
               {{ row.desktop_node_id || '待配置' }}
             </span>
             <span v-else class="account-meta">不适用</span>
@@ -134,6 +136,7 @@
               <span class="account-meta">Seller Member ID</span>
               <code>{{ row.sellerMemberIdMask || '未提供' }}</code>
             </div>
+            <div v-else-if="row.adapter_type === 'wechat_shop_cloud'" class="account-connection"><span class="account-meta">远端授权 · 无需小店密钥</span></div>
             <div v-else-if="['xiaohongshu', 'wechat_shop', 'kuaishou'].includes(row.channel)" class="account-connection">
               <span class="account-meta">Shop ID</span>
               <code>{{ row.shopIdMask || '未提供' }}</code>
@@ -142,16 +145,17 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="操作" width="92" fixed="right" align="right">
+        <el-table-column label="操作" width="260" fixed="right" align="right">
           <template #default="{ row }">
+            <el-button text type="primary" @click="seatAccountId = row.id; seatDialogVisible = true">配置客服账号</el-button>
             <el-button
               text
               type="danger"
               :icon="Delete"
               :loading="deletingIds.has(row.id)"
-              @click="handleDelete(row)"
+              @click="row.adapter_type === 'wechat_shop_cloud' ? openShopDelete(row) : handleDelete(row)"
             >
-              删除
+              {{ row.adapter_type === 'wechat_shop_cloud' ? '删除店铺' : '删除' }}
             </el-button>
           </template>
         </el-table-column>
@@ -448,14 +452,18 @@
         <el-button type="primary" :loading="submitting" @click="handleSave">创建账号</el-button>
       </template>
     </el-dialog>
+    <ShopDeleteDialog v-model="shopDeleteVisible" :account="shopDeleteAccount" @deleted="loadAccounts" />
   </div>
 </template>
 
 <script setup>
+import AccountSeatDialog from './components/AccountSeatDialog.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, Delete, Plus, Refresh } from '@element-plus/icons-vue'
+import RemoteShopConnection from './components/RemoteShopConnection.vue'
+import ShopDeleteDialog from './components/ShopDeleteDialog.vue'
 
 import {
   createChannelAccount,
@@ -514,11 +522,14 @@ const props = defineProps({
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
+const shopDeleteVisible = ref(false), shopDeleteAccount = ref(null)
+function openShopDelete(account) { shopDeleteAccount.value = account; shopDeleteVisible.value = true }
 const submitting = ref(false)
 const dialogVisible = ref(false)
 const initialized = ref(false)
 const addFormRef = ref(null)
 const accountList = ref([])
+const seatDialogVisible = ref(false), seatAccountId = ref(null)
 const channelOptions = ref([])
 const filterChannel = ref('all')
 const deletingIds = ref(new Set())

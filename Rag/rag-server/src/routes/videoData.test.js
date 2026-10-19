@@ -129,7 +129,7 @@ test('video data router creates records and exports csv', async (t) => {
   app.use('/api/v1/video-data', createVideoDataRouter({
     sequelize,
     authenticate: (req, res, next) => {
-      req.user = { id: 1, role: 'supervisor' }
+      req.user = { id: 1, role: 'admin' }
       next()
     }
   }))

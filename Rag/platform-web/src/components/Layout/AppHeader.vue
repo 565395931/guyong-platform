@@ -69,7 +69,8 @@
       >
         连接设置
       </el-button>
-      <ChannelStatusIndicator v-if="channelChrome.showWahaStatus" />
+      <SeatPresence />
+      <ChannelStatusIndicator v-if="isAdmin && channelChrome.showWahaStatus" />
       <el-dropdown @command="handleCommand">
         <div class="app-header__user-info">
           <el-avatar :size="32" :src="avatar">
@@ -105,6 +106,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/stores/user'
 import { messageReminder, SOUND_TONE_OPTIONS } from '@/utils/messageReminder'
 import { resolveChannelChrome } from '@/modules/navigation/channelChrome'
+import SeatPresence from './SeatPresence.vue'
 import ChannelStatusIndicator from './ChannelStatusIndicator.vue'
 import { getDesktopBridge } from '@/utils/runtimeConfig'
 import { restartBackend, waitForBackendRestart } from '@/api/systemControl'

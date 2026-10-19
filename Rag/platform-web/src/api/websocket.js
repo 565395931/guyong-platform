@@ -13,6 +13,8 @@ import { io } from 'socket.io-client'
 import { useConversationStore } from '@/stores/conversation'
 import { markConversationRead } from '@/api/conversations'
 import { messageReminder } from '@/utils/messageReminder'
+import { fitsWorkspaceTab, isMine } from '@/modules/conversations/workspaceView'
+import { useUserStore } from '@/stores/user'
 import { runtimeConfig } from '@/utils/runtimeConfig'
 
 const messageSummary = (message, fallback = '[消息]') => {
@@ -132,9 +134,6 @@ class WebSocketService {
       this._dispatch('ai_reply_status', data)
     })
 
-    this.socket.on('message_review_updated', (data) => {
-      this._dispatch('message_review_updated', data)
-    })
 
     // 池变更事件
     this.socket.on('pool_change', (data) => {
@@ -149,6 +148,12 @@ class WebSocketService {
     })
 
     // 坐席状态变更
+    this.socket.on('bindings_changed', () => {
+      const store = useConversationStore()
+      store.clearCurrent(); store.setList([]); store.fetchPoolStats({force:true})
+      this._dispatch('bindings_changed', {})
+    })
+
     this.socket.on('seat_status_change', (data) => {
       console.log('[WS] 坐席状态变更:', data)
       this._dispatch('seat_status_change', data)
@@ -259,6 +264,7 @@ class WebSocketService {
           Number(existingConversation?.unread_count || 0) + (shouldIncreaseUnread ? 1 : 0)
         )
       nextConversation = {
+        ...existingConversation,
         ...convData,
         last_message: summary,
         last_message_time: message.serverTimestamp || Date.now(),
@@ -353,6 +359,7 @@ class WebSocketService {
    * 处理会话变更
    */
   _handleConversationUpdate(data) {
+    if (data.conversation) data = { ...data, ...data.conversation }
     const convStore = useConversationStore()
     // 如果有完整会话数据，用 upsert（新会话也能插入）
     if (data.id) {
@@ -381,6 +388,7 @@ class WebSocketService {
       convStore.removeConversation(data.conversationId)
     }
 
+    convStore.fetchPoolStats({force:true})
     this._dispatch('conversation_update', data)
   }
 
@@ -427,6 +435,7 @@ class WebSocketService {
       }
     }
 
+    convStore.fetchPoolStats({force:true})
     this._dispatch('pool_change', data)
   }
 
@@ -439,13 +448,7 @@ class WebSocketService {
   }
 
   _shouldShowInActiveTab(convStore, conversation) {
-    const currentTab = convStore.activePoolTab
-    if (currentTab === 'all') return true
-    const conversationTab = this._getConversationTab(conversation)
-    // 「我的」额外收录归档会话（归档不改 pool_type/claimed_by，认领关系仍在），
-    // 与后端列表查询的归档豁免保持一致，否则池变更时会把这条从「我的」里删掉。
-    if (currentTab === 'private' && conversation?.conv_status === 'archived') return true
-    return Boolean(conversationTab && conversationTab === currentTab)
+    return fitsWorkspaceTab(conversation, convStore.activePoolTab, useUserStore().userInfo || {})
   }
 
   /**
@@ -465,7 +468,8 @@ class WebSocketService {
 
   _getConversationTab(conversation) {
     if (!conversation) return null
-    if (conversation.conv_status === 'archived') return 'archived'
+    if (conversation.conv_status === 'archived' || conversation.status === 'closed') return 'archived'
+    if (isMine(conversation, useUserStore().userInfo || {})) return 'private'
     return conversation.pool_type || null
   }
 

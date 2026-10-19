@@ -37,6 +37,10 @@ LOCAL_MIGRATION_CHECKLIST.md
 **/.tmp-electron.zip
 
 # Runtime databases, queues, logs, and generated artifacts
+# Local verification evidence can contain account details or customer UI data.
+docs/changes/*.json
+docs/changes/*.png
+docs/changes/*.jpg
 .codegraph/
 .tmp/
 **/.superpowers/

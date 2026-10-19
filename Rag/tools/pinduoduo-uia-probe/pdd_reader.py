@@ -473,10 +473,10 @@ class PddChatReader:
             counters: dict[tuple, int] = {}
             fresh = 0
             for m in msgs:
-                token = (m["direction"], m["text"])
+                token = (m["direction"], m.get("timeText", ""), m["text"])
                 occ = counters.get(token, 0)
                 counters[token] = occ + 1
-                fp = _hl.sha256(f"pdd|{key}|{m['direction']}||{m['text']}|{occ}".encode()).hexdigest()[:32]
+                fp = fingerprint(key, m["direction"], m.get("timeText", ""), m["text"], occ)
                 if fp in local_seen or fp in self.seen:
                     continue
                 local_seen.add(fp)
@@ -574,7 +574,6 @@ class PddChatReader:
                 state = (grp["label"], item.get("preview"))
                 if only_changed and self.last_item_state.get(key) == state:
                     continue
-                self.last_item_state[key] = state
                 if not self._click_by_name(main, item["name"], lines):
                     log(f"  跳过 {key!r}: 面板中未定位到（可能名字含标签被拆分）")
                     continue
@@ -586,6 +585,7 @@ class PddChatReader:
                 parsed = parse_middle_chat(lines2, W2, H2)
                 apply_direction_by_color(os.path.join(OUT_DIR, "pdd_capture.png"),
                                          parsed["messages"], self.scale)
+                self.last_item_state[item["name"]] = state
                 title = masked_customer_name(read_conversation_title(main2, self.scale))
                 key = title or parsed.get("title") or item["name"]
                 if key not in self.initialized:
@@ -595,7 +595,7 @@ class PddChatReader:
                         for m in backfilled:
                             self.seen.add(m["fp"])
                             new_messages.append({
-                                "conversationKey": key, "conversationName": key,
+                                "conversationKey": f"pdd:{key}", "conversationName": key,
                                 "direction": m["direction"], "timeText": m["timeText"],
                                 "clientTimestamp": to_iso_time(m["timeText"]) if m["timeText"] else "",
                                 "text": m["text"], "fingerprint": m["fp"]})

@@ -14,6 +14,7 @@ class GatewayLink extends EventEmitter {
     this.url = options.url || process.env.CLOUD_GATEWAY_URL || 'ws://127.0.0.1:8787'
     this.authToken = options.authToken || process.env.CLOUD_GATEWAY_AUTH_TOKEN
     this.authTokenProvider = options.authTokenProvider
+    this.accountBindings = options.accountBindings
     this.clientId = options.clientId || 'rag-server'
     this.lastCursor = options.lastCursor || 0
     this.heartbeatMs = options.heartbeatMs || 15000
@@ -48,7 +49,9 @@ class GatewayLink extends EventEmitter {
         try {
           const authToken = this.authTokenProvider ? this.authTokenProvider() : this.authToken
           if (!authToken) throw new Error('cloud gateway auth token is not configured')
-          this.send(createHello({ authToken, clientId: this.clientId, lastCursor: this.lastCursor }))
+          const hello = createHello({ authToken, clientId: this.clientId, lastCursor: this.lastCursor })
+          if (this.accountBindings) hello.payload.accountBindings = this.accountBindings
+          this.send(hello)
           this.emit('connected')
           this.startHeartbeat()
         } catch (error) {
@@ -60,12 +63,12 @@ class GatewayLink extends EventEmitter {
       if (socket.on) {
         socket.on('open', onOpen)
         socket.on('message', onMessage)
-        socket.on('close', () => this.handleClose())
+        socket.on('close', code => this.handleClose(code))
         socket.on('error', error => { this.emit('error', error); settleReject(error) })
       } else if (socket.addEventListener) {
         socket.addEventListener('open', onOpen)
         socket.addEventListener('message', event => onMessage(event.data))
-        socket.addEventListener('close', () => this.handleClose())
+        socket.addEventListener('close', event => this.handleClose(event.code))
         socket.addEventListener('error', event => { const error = event.error || event; this.emit('error', error); settleReject(error) })
       }
       const handshakeTimer = setTimeout(() => {
@@ -153,10 +156,11 @@ class GatewayLink extends EventEmitter {
     this.emit('message', envelope)
   }
 
-  handleClose() {
+  handleClose(code) {
     this.ready = false
     clearInterval(this.heartbeatTimer)
     this.emit('disconnected')
+    if (code === 1008) { this.stopped = true; this.emit('authentication_rejected') }
     if (!this.stopped) this.scheduleReconnect()
   }
 

@@ -77,7 +77,7 @@ function createLeaseService({
       return repository.withLeaseLock(accountId, async context => {
         assertBinding(context, nodeId)
         const current = context.lease
-        if (current && Number(current.nodeId) !== Number(nodeId)) {
+        if (current && Number(current.nodeId) !== Number(nodeId) && current.expiresAt.getTime() > now().getTime()) {
           throw new BridgeDomainError('ACCOUNT_LEASE_CONFLICT', 'Account is leased to another node')
         }
         const { lease, leaseToken, audit } = newLease(context, accountId, nodeId, 'lease.reclaim')
@@ -111,7 +111,7 @@ function createLeaseService({
     },
 
     takeover({ accountId, nodeId, actor, reason }) {
-      if (!actor || !['supervisor', 'admin'].includes(actor.role)) {
+      if (!actor || !['admin'].includes(actor.role)) {
         throw new BridgeDomainError('TAKEOVER_FORBIDDEN', 'Supervisor or admin role is required')
       }
       const normalizedReason = String(reason || '').trim()

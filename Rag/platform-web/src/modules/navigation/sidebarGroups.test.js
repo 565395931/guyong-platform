@@ -4,9 +4,9 @@ import { readFileSync } from 'node:fs'
 
 const source = readFileSync(new URL('../../components/Layout/AppSidebar.vue', import.meta.url), 'utf8')
 
-test('sidebar renders review badge data instead of relying on a header command', () => {
-  assert.match(source, /child\.badge\s*===\s*'review'/)
-  assert.match(source, /el-badge/)
+test('sidebar retains pending counts and removes review badges', () => {
+  assert.doesNotMatch(source, /reviewCounter|review-badge/)
+  assert.match(source, /app-sidebar__pending-badge/)
 })
 
 test('sidebar registers group icons for customer work and business operations', () => {

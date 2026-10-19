@@ -12,7 +12,9 @@ export const useConversationStore = defineStore('conversation', () => {
   const selectionVersion = ref(0)
 
   // 池类型 Tab — 默认待人工池（最高优先级）
-  const activePoolTab = ref('pending_human')
+  let initialPool = 'pending_human'
+  try { if (JSON.parse(localStorage.getItem('platform_user') || '{}')?.role === 'agent') initialPool = 'private' } catch {}
+  const activePoolTab = ref(initialPool)
 
   // 各池数量统计
   const poolStats = ref({

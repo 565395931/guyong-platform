@@ -23,6 +23,7 @@
           AI已服务{{ conversation.ai_reply_count }}轮
         </el-tag>
         <div class="chat-window__actions">
+          <el-button size="small" @click="remarkDialogVisible = true">备注</el-button>
           <!-- 拉取历史按钮 -->
           <el-button
             v-if="conversation.channel === 'whatsapp'"
@@ -35,6 +36,7 @@
           </el-button>
 
           <el-button
+            v-if="!isArchivedConversation(conversation)"
             size="small"
             type="success"
             plain
@@ -46,11 +48,13 @@
           </el-button>
 
           <!-- 私有池/长期跟进池操作按钮 -->
-          <template v-if="['private', 'long_term'].includes(conversation.pool_type)">
+          <template v-if="canReleaseConversation(conversation)">
             <el-button type="warning" size="small" plain :icon="Top" @click="handleRelease">释放</el-button>
-            <el-button v-if="conversation.pool_type === 'private'" type="success" size="small" plain :icon="Star" @click="handleMarkLongTerm">长期</el-button>
             <el-button type="info" size="small" plain :icon="Check" @click="handleArchive">归档</el-button>
           </template>
+
+          <el-button v-if="isArchivedConversation(conversation)" type="primary" size="small"
+            :loading="reviving" @click="handleRevive">复活</el-button>
 
           <!-- AI自助池/待人工池/公共池 → 抢单按钮 -->
           <el-button
@@ -98,12 +102,17 @@
         </template>
       </div>
       <div v-if="transportReadOnly" class="chat-window__transport-notice" role="status">
-        {{ props.readOnlyReason || '需要在线桌面节点' }}
+        {{ cloudShopAccount ? '远端小店连接未就绪，暂不能发送' : (props.readOnlyReason || '需要在线桌面节点') }}
+      </div>
+      <div v-else-if="isArchivedConversation(conversation)" class="chat-window__transport-notice" role="status">
+        此会话已归档，请先复活再回复
       </div>
       <ChatInput
+        :key="conversation.id"
         ref="chatInputRef"
-        :disabled="sending || transportReadOnly"
+        :disabled="sending || transportReadOnly || isArchivedConversation(conversation)"
         :sending-mode="sendingMode"
+        :channel="conversation.channel"
         @send="handleSend"
       />
     </template>
@@ -115,24 +124,29 @@
       :submitting="assigningSeat"
       @confirm="handleAssignSeat"
     />
+    <CustomerRemarkDialog v-model="remarkDialogVisible" :conversation="conversation" @updated="conversationStore.updateConversation" />
   </div>
 </template>
 
 <script setup>
+import { mergeDeliveryStatus } from '@/modules/conversations/deliveryStatus'
 import { ref, watch, nextTick, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { Download, Close, Top, Star, Check, Pointer, ShoppingCart } from '@element-plus/icons-vue'
+import { Download, Close, Top, Check, Pointer, ShoppingCart } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useConversationStore } from '@/stores/conversation'
 import { useUserStore } from '@/stores/user'
 import { useAiSuggestModelsStore } from '@/stores/aiSuggestModels'
+import { useChannelHealth } from '@/modules/channels/channelHealth'
 import { getMessages, sendMessage } from '@/api/messages'
-import { syncHistory, claimConversation, releaseConversation, markLongTerm, archiveConversation } from '@/api/conversations'
+import { syncHistory, claimConversation, releaseConversation, markLongTerm, archiveConversation, reviveConversation } from '@/api/conversations'
 import { createOrderFromConversation } from '@/api/orders'
 import { websocketService } from '@/api/websocket'
 import MessageBubble from './MessageBubble.vue'
 import ChatInput from './ChatInput.vue'
 import AssignSeatDialog from '@/components/Conversation/AssignSeatDialog.vue'
+import CustomerRemarkDialog from '@/components/Conversation/CustomerRemarkDialog.vue'
+import { isArchivedConversation, canReleaseConversation } from '@/modules/conversations/conversationActions'
 import EmptyState from '@/components/Common/EmptyState.vue'
 import LoadingSkeleton from '@/components/Common/LoadingSkeleton.vue'
 import { getConversationDisplayName, isWhatsAppGroupConversation } from '@/utils/conversationDisplay'
@@ -145,8 +159,10 @@ const props = defineProps({
 
 const displayName = computed(() => getConversationDisplayName(props.conversation))
 const isGroupConversation = computed(() => isWhatsAppGroupConversation(props.conversation))
+const remoteShopHealth = useChannelHealth()
+const cloudShopAccount = computed(() => remoteShopHealth.remoteShopAccounts.value.find(row => Number(row.accountId) === Number(props.conversation?.account_id || props.conversation?.accountId)))
 const transportReadOnly = computed(() =>
-  props.readOnlyChannels.includes(props.conversation?.channel)
+  cloudShopAccount.value ? cloudShopAccount.value.state !== 'connected' : props.readOnlyChannels.includes(props.conversation?.channel)
 )
 
 const conversationStore = useConversationStore()
@@ -168,6 +184,8 @@ const syncingHistory = ref(false)
 const creatingOrder = ref(false)
 const assignDialogVisible = ref(false)
 const assigningSeat = ref(false)
+const remarkDialogVisible = ref(false)
+const reviving = ref(false)
 const aiReplyStatus = ref({ active: false, status: '', jobMarker: null })
 let messagesRequestSeq = 0
 let aiReplyStatusTimer = null
@@ -208,10 +226,12 @@ const normalizeMessage = (rawMsg) => {
     transcriptionStatus: msgContent?.transcriptionStatus || rawMsg.transcriptionStatus || '',
     timestamp,
     sendStatus: rawMsg.sendStatus || 'sent',
+    sendError: rawMsg.sendError || rawMsg.errorMessage || msgContent?.sendError || '',
     // 发送失败后"重试"要原样重发，这里保留当时的请求负载。
     // 只按气泡显示的正文重发是不够的——媒体消息的 fileUrl/mimeType/mediaFileId
     // 不在正文里，重发会退化成一条纯文本。
     retryPayload: rawMsg.retryPayload || null,
+    mediaFileId: msgContent?.mediaFileId || rawMsg.mediaFileId || null,
     channelMsgId: rawMsg.channelMsgId || rawMsg.channelMessageId || null,
     // 翻译相关字段：新结构中 text=原文，translatedText=译文
     translated: msgContent?.translated || rawMsg.translated || false,
@@ -250,6 +270,7 @@ const isSameOutgoingTempMessage = (existing, incoming) => {
   if (existing.direction !== 'outbound' || incoming.direction !== 'outbound') return false
   if (existing.senderType !== incoming.senderType && incoming.senderType !== 'agent') return false
   if (existing.content !== incoming.content) return false
+  if (existing.type !== incoming.type || existing.fileUrl !== incoming.fileUrl) return false
   return Math.abs((existing.timestamp || 0) - (incoming.timestamp || Date.now())) < 60 * 1000
 }
 
@@ -258,7 +279,8 @@ const mergeMessage = (oldMsg, newMsg) => ({
   ...newMsg,
   id: newMsg.id || oldMsg.id,
   clientId: newMsg.clientId || oldMsg.clientId,
-  sendStatus: newMsg.sendStatus || oldMsg.sendStatus,
+  sendStatus: mergeDeliveryStatus(oldMsg.sendStatus, newMsg.sendStatus),
+  sendError: newMsg.sendError || oldMsg.sendError,
   retryPayload: newMsg.retryPayload || oldMsg.retryPayload,
   channelMsgId: newMsg.channelMsgId || oldMsg.channelMsgId
 })
@@ -461,8 +483,9 @@ const handleWsMessageUpdate = (data) => {
   if (idx !== -1) {
     messages.value[idx] = {
       ...messages.value[idx],
-      sendStatus: data.sendStatus || messages.value[idx].sendStatus,
-      channelMsgId: data.channelMsgId || messages.value[idx].channelMsgId
+      sendStatus: mergeDeliveryStatus(messages.value[idx].sendStatus, data.sendStatus),
+      sendError: data.errorMessage || messages.value[idx].sendError || '',
+      channelMsgId: data.channelMsgId || data.channelMessageId || messages.value[idx].channelMsgId
     }
   }
 }
@@ -568,8 +591,22 @@ const statusLabel = (status) => {
 const canClaim = computed(() => {
   const pool = props.conversation?.pool_type
   return ['ai_self', 'pending_human', 'public'].includes(pool) &&
-    props.conversation?.conv_status !== 'archived'
+    !isArchivedConversation(props.conversation)
 })
+
+const handleRevive = async () => {
+  if (reviving.value || !isArchivedConversation(props.conversation)) return
+  const id = props.conversation.id
+  reviving.value = true
+  try {
+    const response = await reviveConversation(id)
+    if (response.success === false) throw new Error(response.message || '复活失败')
+    conversationStore.updateConversation({ id, pool_type: 'pending_human', conv_status: 'pending_claim', status: 'open', claimed_by: null, agent_id: null })
+    await conversationStore.fetchPoolStats({ force: true })
+    ElMessage.success('会话已复活到待人工池')
+  } catch { ElMessage.error('复活失败，请重试') }
+  finally { reviving.value = false }
+}
 
 const isAdminUser = computed(() => userStore.userInfo?.role === 'admin')
 const claimActionLabel = computed(() => {
@@ -818,6 +855,7 @@ const handleSend = async (payload) => {
       // 成功即 sent（绿勾）、失败会走下面的 catch（标红可重试）。
       sendStatus: res.data?.sendStatus || 'sent'
     })
+    if (isMediaPayload) chatInputRef.value?.clearFileIfMatches?.(payload.file.id)
     if (isTranslateSend) {
       const targetLanguage = res.data?.translation?.targetLanguageLabel || '客户语言'
       ElMessage.success(
@@ -827,10 +865,11 @@ const handleSend = async (payload) => {
       )
     }
   } catch (error) {
+    if (isMediaPayload && error?.response?.data?.data?.sendStatus === 'unknown') chatInputRef.value?.clearFileIfMatches?.(payload.file.id)
     console.error('[ChatWindow] 发送消息失败:', error)
     if (!isTranslateSend) {
       upsertMessage({
-        id: tempId,
+        id: error?.response?.data?.data?.messageId || tempId,
         clientId: tempId,
         conversationId: props.conversation.id,
         direction: 'outbound',
@@ -838,7 +877,8 @@ const handleSend = async (payload) => {
         content,
         messageType,
         serverTimestamp: optimisticTs,
-        sendStatus: 'failed',
+        sendStatus: error?.response?.data?.data?.sendStatus || 'failed',
+        sendError: error?.response?.data?.data?.sendError || formatSendError(error),
         retryPayload
       })
     }
@@ -873,7 +913,7 @@ const handleRetry = async (msg) => {
   if (!msg || msg.sendStatus !== 'failed') return
 
   const convId = props.conversation.id
-  const payload = msg.retryPayload || { content: msg.content, messageType: msg.type || 'text' }
+  const payload = msg.retryPayload || { content: { text: msg.content, fileUrl: msg.fileUrl, fileName: msg.fileName, mimeType: msg.mimeType, mediaFileId: msg.mediaFileId }, messageType: msg.type || 'text' }
   const { content, messageType, isTranslateSend = false } = payload
 
   const tempId = 'temp_retry_' + Date.now()

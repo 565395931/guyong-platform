@@ -100,7 +100,6 @@ const LAST_REPLY_BY = {
 const SEAT_STATUS = {
   ONLINE: 'online',
   OFFLINE: 'offline',
-  AWAY: 'away',
   BUSY: 'busy'
 }
 

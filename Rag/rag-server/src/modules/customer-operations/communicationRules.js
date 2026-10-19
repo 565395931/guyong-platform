@@ -28,7 +28,7 @@ function localDateKey(value, timeZone = process.env.APP_TIMEZONE || 'Asia/Shangh
 }
 
 function buildVisibilityPredicate(user, alias = 'c') {
-  if (['admin', 'supervisor'].includes(user?.role)) {
+  if (['admin'].includes(user?.role)) {
     return { sql: '1=1', replacements: {} }
   }
 

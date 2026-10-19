@@ -13,6 +13,7 @@
         <span class="conversation-item__time">{{ formatTime(conversation.last_message_time) }}</span>
       </div>
 
+      <el-tag v-if="conversation.pool_type === 'pending_human' && conversation.agent_name" size="small" type="info" effect="plain">{{ conversation.agent_name }} 待接待</el-tag>
       <!-- 第二行：最后消息 + 未读 -->
       <div class="conversation-item__body">
         <span class="conversation-item__message">{{ conversation.last_message }}</span>
@@ -84,10 +85,9 @@
         </el-button>
 
         <!-- 私有池 → 释放 / 标记长期 / 归档 -->
-        <template v-if="conversation.pool_type === 'private'">
+        <template v-if="!isArchivedConversation(conversation) && conversation.pool_type === 'private'">
           <el-button type="warning" size="small" plain :icon="Top" @click.stop="$emit('release', conversation)">释放</el-button>
           <el-button type="primary" size="small" plain :icon="Monitor" @click.stop="$emit('transfer-to-ai', conversation)">转AI</el-button>
-          <el-button type="success" size="small" plain :icon="Star" @click.stop="$emit('mark-long-term', conversation)">长期</el-button>
           <el-button type="info" size="small" plain :icon="Check" @click.stop="$emit('archive', conversation)">归档</el-button>
         </template>
 
@@ -105,7 +105,7 @@
 
         <!-- 归档会话 → 复活按钮 -->
         <el-button
-          v-if="conversation.conv_status === 'archived'"
+          v-if="isArchivedConversation(conversation)"
           type="primary"
           size="small"
           plain
@@ -120,9 +120,10 @@
 </template>
 
 <script setup>
+import { isArchivedConversation } from '@/modules/conversations/conversationActions'
 import dayjs from 'dayjs'
 import { computed } from 'vue'
-import { Monitor, User, Service, Pointer, Top, Star, Check, RefreshRight, ChatLineRound } from '@element-plus/icons-vue'
+import { Monitor, User, Service, Pointer, Top, Check, RefreshRight, ChatLineRound } from '@element-plus/icons-vue'
 import { useConversationStore } from '@/stores/conversation'
 import { useUserStore } from '@/stores/user'
 import { getConversationAvatarText, getConversationDisplayName, isWhatsAppGroupConversation } from '@/utils/conversationDisplay'
@@ -180,17 +181,17 @@ const aiRoundsOverLimit = computed(() => {
 const canClaim = computed(() => {
   const pool = props.conversation.pool_type
   return ['ai_self', 'pending_human', 'public'].includes(pool) &&
-    props.conversation.conv_status !== 'archived'
+    !isArchivedConversation(props.conversation)
 })
 
 const claimButtonLabel = computed(() => {
   if (isAdminUser.value) return '分配坐席'
-  return props.conversation.pool_type === 'ai_self' ? '接管' : '抢单'
+  return props.conversation.pool_type === 'ai_self' ? '接管' : '接待'
 })
 
 const canTransferToAi = computed(() => {
   return props.conversation.pool_type !== 'ai_self' &&
-    props.conversation.conv_status !== 'archived'
+    !isArchivedConversation(props.conversation)
 })
 
 const showSeatOwner = computed(() => {

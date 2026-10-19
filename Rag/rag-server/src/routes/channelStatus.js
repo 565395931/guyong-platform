@@ -2,7 +2,7 @@
  * 多渠道连接状态 API
  *
  * GET /api/v1/channels/status
- * 认证：任意有效 JWT（agent/supervisor/admin 均可访问）
+ * 认证：任意有效 JWT（agent/admin 均可访问）
  * 返回所有已配置渠道的连接状态摘要，WhatsApp 提供实时 session 级别状态。
  */
 
@@ -12,7 +12,7 @@ const jwt = require('jsonwebtoken')
 const { sequelize } = require('../config/database')
 const registry = require('../modules/waha-registry')
 
-const JWT_SECRET = process.env.JWT_SECRET || 'rag_secret_key_2024_dev_only'
+const JWT_SECRET = process.env.JWT_SECRET
 
 const CHANNEL_LABELS = {
   whatsapp: 'WhatsApp',
@@ -159,7 +159,15 @@ router.get('/', async (req, res) => {
       desktopBridge = null
     }
 
-    res.json({ success: true, data: buildChannelStatusSummary(accountRows, waSessions, desktopBridge) })
+    const summary = buildChannelStatusSummary(accountRows, waSessions, desktopBridge)
+    const shopConnections = req.app.get('localShopConnection')?.status() || []
+    summary.remoteShopAccounts = shopConnections.flatMap(connection => connection.accounts.map(accountId => ({ accountId, state: connection.state })))
+    if (shopConnections.length) {
+      const shop = summary.channels.find(row => row.channel === 'wechat_shop')
+      if (shop) shop.status = shopConnections.every(row => row.state === 'connected') ? 'CONNECTED' : 'OFFLINE'
+      if (shop?.status === 'OFFLINE') summary.overall = 'CRITICAL'
+    }
+    res.json({ success: true, data: summary })
   } catch (err) {
     console.error('[ChannelStatus] failed:', err)
     res.status(500).json({ success: false, message: '查询渠道状态失败: ' + err.message })

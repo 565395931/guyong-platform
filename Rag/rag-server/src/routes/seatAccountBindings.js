@@ -7,7 +7,7 @@
  * - GET    /api/v1/seat-bindings               查询绑定列表（支持筛选）
  * - GET    /api/v1/seat-bindings/available      查询可绑定的账号
  *
- * 认证：需要 JWT Token（admin/supervisor 权限）
+ * 认证：需要 JWT Token（admin 权限）
  */
 
 const express = require('express')
@@ -21,7 +21,7 @@ const { parseWahaAccountConfig } = require('../shared/utils/wahaConfig')
 
 // ========== 认证中间件 ==========
 router.use(createAuthenticate(), (req, res, next) => {
-  if (!['admin', 'supervisor'].includes(req.user.role)) {
+  if (!['admin'].includes(req.user.role)) {
     return res.status(403).json({ success: false, message: '无权限管理坐席绑定' })
   }
   return next()
@@ -123,12 +123,12 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ success: false, message: 'seat_id 和 account_id 不能为空' })
     }
 
-    // 校验坐席存在且角色为 agent 或 supervisor
+    // 校验坐席存在且角色为 agent
     const seat = await User.findByPk(seat_id)
     if (!seat) {
       return res.status(404).json({ success: false, message: '坐席不存在' })
     }
-    if (!['agent', 'supervisor'].includes(normalizeRole(seat.role))) {
+    if (seat.status !== 'active' || !['agent'].includes(normalizeRole(seat.role))) {
       return res.status(400).json({ success: false, message: '该用户不是坐席角色，无法绑定账号' })
     }
 
@@ -157,6 +157,7 @@ router.post('/', async (req, res) => {
       status: 'active'
     })
 
+    await require('../modules/websocket/socketHandler').syncSeatAccountRooms(seat_id,{notify:true})
     console.log(`[SeatBinding] 坐席 ${seat.username}(${seat_id}) 绑定 ${account.channel} 账号 ${account.account_name}(${account_id})`)
 
     let realtimeSync = null
@@ -215,6 +216,11 @@ router.delete('/:id', async (req, res) => {
 
     console.log(`[SeatBinding] 解绑: seat_id=${binding.seat_id}, account_id=${binding.account_id}, channel=${binding.channel}`)
 
+    await sequelize.query(`UPDATE conversations SET pool_type='pending_human',conv_status='pending_claim',claimed_by=NULL,agent_id=NULL,
+      pending_since=NOW(),ai_epoch=ai_epoch+1,updated_at=NOW() WHERE account_id=:accountId
+      AND (claimed_by=:seatId OR agent_id=:seatId) AND status!='closed' AND conv_status!='archived'`,
+      {replacements:{accountId:binding.account_id,seatId:binding.seat_id}})
+    await require('../modules/websocket/socketHandler').syncSeatAccountRooms(binding.seat_id,{notify:true})
     res.json({ success: true, message: '账号已解绑' })
   } catch (err) {
     console.error('[SeatBinding] 解绑失败:', err.message)

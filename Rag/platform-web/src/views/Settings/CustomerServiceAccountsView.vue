@@ -2,6 +2,7 @@
   <div class="customer-service-accounts-view">
     <section class="account-toolbar" aria-label="客服账号筛选">
       <div class="account-toolbar__actions">
+        <el-button size="small" :loading="seatsLoading" @click="configureSeats">配置客服账号</el-button>
         <el-tooltip content="刷新账号列表" placement="bottom">
           <el-button circle size="small" :icon="Refresh" aria-label="刷新账号列表" @click="refresh" />
         </el-tooltip>
@@ -11,6 +12,7 @@
       </div>
     </section>
 
+    <AccountSeatDialog v-model="seatDialogVisible" :accounts="seatAccounts" />
     <main class="customer-service-accounts-view__content">
       <PlatformAccountsView
         v-if="selectedChannel === 'wecom_kf'"
@@ -29,6 +31,9 @@
 </template>
 
 <script setup>
+import AccountSeatDialog from './components/AccountSeatDialog.vue'
+import request from '@/api/index'
+import { ElMessage } from 'element-plus'
 import { ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Plus, Refresh } from '@element-plus/icons-vue'
@@ -36,6 +41,17 @@ import AccountManage from './AccountManage.vue'
 import PlatformAccountsView from './PlatformAccountsView.vue'
 import { normalizePlatformChannel } from '@/modules/platformMessages/platformFilters'
 
+const seatDialogVisible = ref(false), seatsLoading = ref(false), seatAccounts = ref([])
+async function configureSeats() {
+  if (seatsLoading.value) return
+  seatsLoading.value = true
+  try {
+    const result = await request.get('/v1/channel-accounts',{params:{channel:selectedChannel.value === 'all' ? undefined : selectedChannel.value}})
+    seatAccounts.value = result.data || []
+    if (!seatAccounts.value.length) return ElMessage.info('请先添加或同步一个平台账号')
+    seatDialogVisible.value = true
+  } finally { seatsLoading.value = false }
+}
 const route = useRoute()
 const managerRef = ref(null)
 const selectedChannel = ref(normalizePlatformChannel(route.query.channel))

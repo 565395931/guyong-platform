@@ -3,7 +3,7 @@
 const express = require('express')
 const { createAuthenticate } = require('../../middleware/authenticate')
 
-const canManage = user => ['supervisor', 'admin'].includes(user?.role)
+const canManage = user => ['admin'].includes(user?.role)
 
 function createOrderFulfillmentRouter({ service, authenticate = createAuthenticate() }) {
   if (!service) throw new TypeError('order fulfillment service is required')

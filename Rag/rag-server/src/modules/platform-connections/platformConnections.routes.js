@@ -1,10 +1,10 @@
 const express = require('express')
 const { createAuthenticate } = require('../../middleware/authenticate')
 
-const canViewConnections = user => ['admin', 'supervisor'].includes(user?.role)
+const canViewConnections = user => ['admin'].includes(user?.role)
 const canManageConnections = user => user?.role === 'admin'
-const canManageAccountPolicy = user => ['admin', 'supervisor'].includes(user?.role)
-const canManageAllowlist = user => ['admin', 'supervisor'].includes(user?.role)
+const canManageAccountPolicy = user => ['admin'].includes(user?.role)
+const canManageAllowlist = user => ['admin'].includes(user?.role)
 
 function statusForError(error) {
   const message = String(error?.message || '')

@@ -1,7 +1,9 @@
 <template>
   <div class="message-bubble" :class="`message-bubble--${message.role}`">
     <!-- 发送状态：仅出站消息，绝对定位到气泡左侧（不改变气泡自身布局） -->
-    <span
+    <component
+      :is="sendStatusView === 'failed' ? 'button' : 'span'"
+      :type="sendStatusView === 'failed' ? 'button' : undefined"
       v-if="showSendStatus"
       class="send-status"
       :class="`send-status--${sendStatusView}`"
@@ -19,11 +21,11 @@
       <svg v-else-if="sendStatusView === 'sent'" viewBox="0 0 24 24" fill="none">
         <path d="M9 16.17L4.83 12L3.41 13.41L9 18.83L20.59 7.41L19.17 6L9 16.17Z" fill="currentColor"/>
       </svg>
-      <!-- 失败：标红，点击重试 -->
+      <!-- 失败：标红，点击查看原因 -->
       <svg v-else viewBox="0 0 24 24" fill="none">
         <path d="M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM13 17H11V15H13V17ZM13 13H11V7H13V13Z" fill="currentColor"/>
       </svg>
-    </span>
+    </component>
 
     <!-- 引用消息块 -->
     <div v-if="message.quotedMsg" class="message-bubble__quoted">
@@ -33,7 +35,8 @@
 
     <!-- 媒体消息 -->
     <div v-if="message.type === 'image' && message.fileUrl" class="message-bubble__media">
-      <img :src="resolveAssetUrl(message.fileUrl)" :alt="message.fileName || 'image'" @click="openFile(message.fileUrl)" />
+      <PrivateShopImage v-if="message.fileUrl.startsWith('/api/v1/local-workbench/media/')" :source="message.fileUrl" />
+      <img v-else :src="resolveAssetUrl(message.fileUrl)" :alt="message.fileName || 'image'" @click="openFile(message.fileUrl)" />
       <div v-if="message.content" class="message-bubble__caption">{{ message.content }}</div>
     </div>
     <div v-else-if="message.type === 'video' && message.fileUrl" class="message-bubble__media">
@@ -69,6 +72,10 @@
     <!-- 正文：默认始终显示原文 -->
     <div v-else class="message-bubble__content">{{ message.content }}</div>
 
+    <div v-if="isOutgoingMessage && sendStatusView === 'cancelled'" class="message-bubble__delivery-error" role="status">人工已接管，这条 AI 回复已作废</div>
+    <div v-if="isOutgoingMessage && sendStatusView === 'unknown'" class="message-bubble__delivery-error" role="status">
+      {{ sendStatusView === 'unknown' ? '发送结果待确认，请勿重复发送' : (message.sendError || '发送失败，平台未接收') }}
+    </div>
     <!-- 翻译标注：仅翻译过的消息才显示译文折叠区，默认展开 -->
     <div v-if="message.translated && message.translatedText && message.translatedText !== message.content" class="message-bubble__translation">
       <div class="message-bubble__translation-badge" @click="showTranslated = !showTranslated">
@@ -253,6 +260,10 @@
         </button>
       </div>
     </el-dialog>
+    <el-dialog v-model="deliveryErrorVisible" title="消息发送失败" width="520px" append-to-body>
+      <p class="delivery-error-detail" role="alert">{{ deliveryErrorText }}</p>
+      <template #footer><el-button @click="deliveryErrorVisible = false">关闭</el-button><el-button v-if="!riskControlBlocked" type="primary" @click="retryFailedMessage">重试发送</el-button></template>
+    </el-dialog>
   </div>
 </template>
 
@@ -263,12 +274,17 @@ import { ElMessage } from 'element-plus'
 import { fetchSuggestions, submitSuggestionFeedback } from '@/api/messages'
 import { useAiSuggestModelsStore } from '@/stores/aiSuggestModels'
 import { resolveAssetUrl } from '@/utils/runtimeConfig'
+import PrivateShopImage from './PrivateShopImage.vue'
 
 const props = defineProps({
   message: { type: Object, required: true }
 })
 
 const emit = defineEmits(['adopt', 'retry'])
+const deliveryErrorVisible=ref(false)
+const riskControlBlocked=computed(()=>String(props.message.sendError || '').includes('10190010'))
+const deliveryErrorText=computed(()=>riskControlBlocked.value ? '消息被微信小店风控拒绝，未发送成功；请调整内容后重试（10190010）' : (props.message.sendError || '发送失败，平台未接收'))
+function retryFailedMessage(){if(sendStatusView.value!=='failed' || riskControlBlocked.value)return;deliveryErrorVisible.value=false;emit('retry',props.message)}
 
 const showSuggestion = ref(false)
 const loading = ref(false)
@@ -352,10 +368,12 @@ const SEND_IN_FLIGHT_STATUSES = new Set(['sending', 'received', 'queued', 'accep
 
 const sendStatusView = computed(() => {
   const status = String(props.message.sendStatus || 'sent')
+  if (status === 'cancelled') return 'cancelled'
   if (status === 'failed') return 'failed'
+  if (status === 'unknown' || status === 'uncertain') return 'unknown'
   if (SEND_IN_FLIGHT_STATUSES.has(status)) return 'sending'
   // 其余（含未知取值）按已确认处理：只是不显示指示器，避免未知状态转圈转到天荒地老
-  return 'sent'
+  return ['sent', 'delivered', 'read'].includes(status) ? 'sent' : 'unknown'
 })
 
 // 绿勾只在对勾**刚出现**的那一下短暂显示：历史消息（挂载时就已经是 sent）
@@ -387,19 +405,20 @@ onBeforeUnmount(clearSentCheckTimer)
 const showSendStatus = computed(() => {
   if (!isOutgoingMessage.value) return false
   const view = sendStatusView.value
-  if (view === 'sending' || view === 'failed') return true
+  if (view === 'sending' || view === 'failed' || view === 'unknown') return true
   return showSentCheck.value
 })
 
 const sendStatusTitle = computed(() => {
-  if (sendStatusView.value === 'sending') return '发送中…'
-  if (sendStatusView.value === 'failed') return '发送失败，点击重试'
+  if (sendStatusView.value === 'unknown') return '发送结果待确认，请勿重复发送'
+  if (sendStatusView.value === 'sending') return '发送中，等待平台确认…'
+  if (sendStatusView.value === 'failed') return '发送失败，点击查看原因'
   return '已发送'
 })
 
 const handleStatusClick = () => {
   if (sendStatusView.value !== 'failed') return
-  emit('retry', props.message)
+  deliveryErrorVisible.value = true
 }
 
 // 切换模型时由 Pinia 统一记住选择并重新生成
@@ -571,6 +590,8 @@ const handleCopy = () => {
 </script>
 
 <style lang="scss" scoped>
+.message-bubble__delivery-error { font-size: 12px; line-height: 1.5; padding: 6px 0 2px; opacity: .95; max-width: 560px; overflow-wrap: anywhere; }
+.send-status--unknown { color: #b45309; }
 .message-bubble {
   position: relative;
   max-width: 70%;
@@ -790,7 +811,9 @@ const handleCopy = () => {
 }
 
 /* ===== 发送状态指示（气泡左侧） ===== */
+.delivery-error-detail { white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7;margin:0; }
 .send-status {
+  padding:0; border:0; background:transparent; font:inherit;
   position: absolute;
   right: 100%;
   top: 50%;
@@ -798,8 +821,8 @@ const handleCopy = () => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 24px;
+  height: 24px;
   margin-right: 6px;
   color: #94a3b8;
 
@@ -816,6 +839,8 @@ const handleCopy = () => {
     color: #16a34a;
     animation: send-status-pop 0.22s ease;
   }
+
+  &:focus-visible { outline:2px solid currentColor; outline-offset:2px; border-radius:4px; }
 
   &--failed {
     color: #ef4444;

@@ -30,8 +30,7 @@ async function detectLanguage(text, model = 'qwen3.6-flash') {
     model,
     temperature: 0,
     maxTokens: 50,
-    apiKey: process.env.DASHSCOPE_API_KEY,
-    configuration: { baseURL: DASHSCOPE_BASE_URL }
+    ...await require('../modules/ai-provider/modelRuntime').runtimeOptions(model)
   })
 
   const messages = [
@@ -108,8 +107,7 @@ async function translateText(text, targetLang, sourceLang = 'auto-detected sourc
     temperature: 0.3,
     maxTokens: 4000,
     ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeout: timeoutMs } : {}),
-    apiKey: process.env.DASHSCOPE_API_KEY,
-    configuration: { baseURL: DASHSCOPE_BASE_URL }
+    ...await require('../modules/ai-provider/modelRuntime').runtimeOptions(model)
   })
 
   const contextSection = buildContextSection(options.contextMessages || [])

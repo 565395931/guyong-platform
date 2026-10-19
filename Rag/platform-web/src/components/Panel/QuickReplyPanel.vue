@@ -2,13 +2,15 @@
   <div class="quick-reply-panel">
     <el-input v-model="filterText" placeholder="搜索话术" size="small" :prefix-icon="Search" clearable />
 
-    <div v-if="!canManage" class="quick-reply-panel__hint">
-      只有管理员 / 主管可以维护话术，你可以点击复制。
+    <div class="quick-reply-panel__hint">新增、编辑和删减只影响你的账号；其他人仍使用自己的话术。</div>
+    <div class="quick-reply-panel__tools">
+      <el-button size="small" :icon="Plus" @click="openCreate({ scope: 'personal' })">新增个人话术</el-button>
+      <el-button size="small" :loading="restoring" @click="restoreShared">恢复公共话术</el-button>
     </div>
 
     <el-empty
       v-if="!loading && treeData.length === 0"
-      description="暂无话术，点右侧「添加」新建"
+      description="暂无话术，点击「新增个人话术」添加"
       :image-size="60"
     />
 
@@ -29,23 +31,9 @@
           <span class="quick-node__label" :title="data.tooltip">{{ data.label }}</span>
 
           <span v-if="canManage" class="quick-node__actions">
-            <el-icon
-              v-if="data.kind !== 'item'"
-              class="quick-node__icon"
-              title="添加话术"
-              @click.stop="openCreate(data)"
-            ><Plus /></el-icon>
-            <el-icon
-              v-if="data.kind === 'item'"
-              class="quick-node__icon"
-              title="编辑"
-              @click.stop="openEdit(data)"
-            ><EditPen /></el-icon>
-            <el-icon
-              class="quick-node__icon quick-node__icon--danger"
-              :title="data.kind === 'item' ? '删除这条话术' : '删除这一层（含其中所有话术）'"
-              @click.stop="handleDelete(data)"
-            ><Delete /></el-icon>
+            <el-button v-if="data.kind !== 'item'" text size="small" :icon="Plus" aria-label="添加个人话术" title="添加个人话术" @click.stop="openCreate(data)" />
+            <el-button v-if="data.kind === 'item'" text size="small" :icon="EditPen" aria-label="编辑我的话术" title="编辑我的话术" @click.stop="openEdit(data)" />
+            <el-button text size="small" type="danger" :icon="Delete" aria-label="从我的话术中移除" title="从我的话术中移除" @click.stop="handleDelete(data)" />
           </span>
         </div>
       </template>
@@ -59,11 +47,12 @@
       append-to-body
       destroy-on-close
     >
-      <el-form label-width="72px" label-position="left">
-        <el-form-item label="归属">
+      <el-alert v-if="form.shared" title="公共库内容对其他客服可见；他们已有的个人修改会保留。" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+      <el-form label-width="72px" label-position="left" novalidate>
+        <el-form-item v-if="isAdmin && (!form.id || form.isSharedSource)" label="归属">
           <el-radio-group v-model="form.shared">
             <el-radio :value="false">个人话术</el-radio>
-            <el-radio :value="true">公共话术</el-radio>
+            <el-radio :value="true">公共库（所有人可见）</el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="分类">
@@ -90,6 +79,7 @@
             v-model="form.content"
             type="textarea"
             :rows="4"
+            resize="none"
             maxlength="10000"
             placeholder="点击话术时复制到剪贴板的内容"
           />
@@ -110,6 +100,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   getQuickReplies, createQuickReply, updateQuickReply, deleteQuickReply
 } from '@/api/messages'
+import request from '@/api/index'
 import { useUserStore } from '@/stores/user'
 
 defineProps({
@@ -126,10 +117,11 @@ const treeVersion = ref(0)
 
 const treeProps = { label: 'label', children: 'children' }
 
-const SCOPE_LABELS = { personal: '个人话术', shared: '公共话术' }
+const SCOPE_LABELS = { personal: '个人话术', shared: '公共话术（我的版本）' }
 
-// 后端只允许 admin / 主管维护，坐席点上去只会 403，所以直接不给按钮
-const canManage = computed(() => ['admin', 'supervisor'].includes(userStore.userInfo?.role))
+// 所有登录客服都可以维护自己的话术版本
+const canManage = computed(() => ['admin', 'agent'].includes(userStore.userInfo?.role))
+const isAdmin = computed(() => userStore.userInfo?.role === 'admin')
 const currentUserId = computed(() => userStore.userInfo?.id ?? null)
 
 const categoryOptions = computed(() => {
@@ -186,16 +178,26 @@ const treeData = computed(() => {
 const loadReplies = async () => {
   loading.value = true
   try {
-    const res = await getQuickReplies({ page: 1, pageSize: 100 })
-    const data = res.data || res || {}
-    replies.value = data.list || []
+    const all = []
+    let page = 1
+    let total = 0
+    do {
+      const res = await getQuickReplies({ page, pageSize: 100 })
+      const data = res.data || res || {}
+      const batch = data.list || []
+      all.push(...batch)
+      total = data.total || 0
+      page += 1
+      if (!batch.length) break
+    } while (all.length < total)
+    replies.value = all
     treeVersion.value += 1
     // 树是整棵重建的，搜索过滤要重新套一遍
     await nextTick()
     treeRef.value?.filter(filterText.value)
   } catch (err) {
     console.error('[QuickReplyPanel] 获取话术失败:', err)
-    replies.value = []
+    ElMessage.error('话术加载失败，请重试')
   } finally {
     loading.value = false
   }
@@ -249,7 +251,7 @@ const openCreate = (data) => {
   if (!canManage.value) return
   form.value = {
     id: null,
-    shared: data.scope === 'shared',
+    shared: false,
     // 在分类行点添加时，分类跟着预填，省一次输入
     category: data.kind === 'category' ? data.category : '',
     title: '',
@@ -264,7 +266,8 @@ const openEdit = (data) => {
   const r = data.reply
   form.value = {
     id: r.id,
-    shared: data.scope === 'shared',
+    isSharedSource: r.createdBy == null,
+    shared: false,
     category: r.category || '',
     title: r.title || '',
     shortcut: r.shortcut || '',
@@ -312,7 +315,7 @@ const handleDelete = async (data) => {
     ? `这条话术「${truncate(data.label)}」`
     : `「${data.label}」这一层，及其中的 ${targets.length} 条话术`
   try {
-    await ElMessageBox.confirm(`确定删除${label}吗？删除后不可恢复。`, '确认删除', {
+    await ElMessageBox.confirm(`确定从你的话术中移除${label}吗？不会影响其他人，公共话术可以恢复。`, '确认删除', {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
@@ -352,12 +355,21 @@ const filterNode = (value, data) => {
   return data.label.includes(value)
 }
 
+const restoring = ref(false)
+const restoreShared = async () => {
+  if (restoring.value) return
+  try { await ElMessageBox.confirm('恢复你对公共话术的编辑和删减，个人新增话术保留。', '恢复公共话术', { confirmButtonText: '恢复', cancelButtonText: '取消', autofocus: false }) } catch { return }
+  restoring.value = true
+  try { await request.post('/v1/quick-replies/restore-shared'); await loadReplies(); ElMessage.success('已恢复公共话术') }
+  finally { restoring.value = false }
+}
 onMounted(loadReplies)
 </script>
 
 <style lang="scss" scoped>
 .quick-reply-panel {
   .el-input { margin-bottom: 12px; }
+  &__tools { display: flex; gap: 8px; margin-bottom: 12px; }
 
   &__hint {
     margin-bottom: 10px;

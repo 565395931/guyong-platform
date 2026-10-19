@@ -8,7 +8,7 @@ const router = express.Router()
 
 // ========== 认证中间件 ==========
 router.use(createAuthenticate(), (req, res, next) => {
-  if (!['admin', 'supervisor'].includes(req.user.role)) {
+  if (!['admin'].includes(req.user.role)) {
     return res.status(403).json({ success: false, message: '无权限管理桌面节点' })
   }
   return next()

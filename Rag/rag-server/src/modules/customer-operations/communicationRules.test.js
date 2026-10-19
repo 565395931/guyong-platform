@@ -20,7 +20,7 @@ test('uses the configured timezone date for the communication day', () => {
   assert.equal(localDateKey('2026-08-03T15:30:00.000Z', 'Asia/Shanghai'), '2026-08-03')
 })
 
-test('ordinary users are scoped to owned conversations while supervisors see all', () => {
+test('ordinary users are scoped to owned conversations while administrators see all', () => {
   assert.match(buildVisibilityPredicate({ role: 'user', id: 7 }).sql, /claimed_by = :viewerId/)
-  assert.equal(buildVisibilityPredicate({ role: 'supervisor', id: 7 }).sql, '1=1')
+  assert.equal(buildVisibilityPredicate({ role: 'admin', id: 7 }).sql, '1=1')
 })

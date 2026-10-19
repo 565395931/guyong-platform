@@ -23,6 +23,10 @@ const DEFAULT_INPUT = path.join(
 
 async function main() {
   const inputPath = process.argv[2] || DEFAULT_INPUT
+  const accountId = Number(process.argv[3])
+  if (!Number.isInteger(accountId) || accountId <= 0) {
+    throw new Error('Usage: node scripts/ingest-scraped-orders.js <json-path> <account-id>')
+  }
   if (!fs.existsSync(inputPath)) {
     console.error(`采集结果不存在：${inputPath}`)
     process.exit(1)
@@ -36,9 +40,11 @@ async function main() {
 
   const service = createScrapedOrderIngestService({ sequelize })
   const result = await service.handle({
+    trustedLocal: true,
     envelope: {
       type: 'commerce.orders.scraped',
       payload: {
+        accountId,
         adapterId: payload.adapterId || 'xiaohongshu.qianfan',
         source: 'qianfan_orders_manual',
         capturedAt: payload.capturedAt,

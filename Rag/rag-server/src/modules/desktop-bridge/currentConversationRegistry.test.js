@@ -6,6 +6,11 @@ const { createBridgeExpiryService } = require('./bridgeExpiryService')
 const { createAccountSnapshotService } = require('./accountSnapshotService')
 
 // 每个用例都从干净状态开始：registry 是模块级单例，用例之间会互相影响。
+function authorizedSnapshotDb(db) {
+  return { query: (sql, options) => /SELECT b.channel_account_id FROM desktop_bridge_bindings/.test(sql)
+    ? Promise.resolve([{ channel_account_id: 4 }]) : db.query(sql, options) }
+}
+
 function resetRegistry() {
   registry.reset()
 }
@@ -36,18 +41,37 @@ test('registry ignores invalid account ids', () => {
   assert.equal(registry.getCurrentKey(undefined), null)
 })
 
+test('offline snapshots stop protecting a conversation after 45 seconds', t => {
+  resetRegistry()
+  let time = 1000
+  t.mock.method(Date, 'now', () => time)
+  registry.setCurrentKey(4, 'current')
+  time += 45001
+  assert.equal(registry.getCurrentKey(4), null)
+})
+
+test('snapshot from a node without an active account lease cannot archive conversations', async () => {
+  resetRegistry()
+  const queries = []
+  const service = createAccountSnapshotService({ sequelize: { query: async sql => { queries.push(sql); return [] } } })
+  const result = await service.handle({ nodeId: 88, envelope: { payload: { accounts: [{ accountId: 4, currentCustomerKey: 'fake' }] } } })
+  assert.equal(result.errorCode, 'ACCOUNT_NOT_BOUND')
+  assert.equal(registry.getCurrentKey(4), null)
+  assert.equal(queries.some(sql => /UPDATE/.test(sql)), false)
+})
+
 test('snapshot registers the current key so the TTL sweep can skip it', async () => {
   resetRegistry()
   const sequelize = {
     query: async (sql) => {
       if (/SELECT user_id, conv_status/.test(sql)) {
-        return [[{ user_id: '01d3be83f264', conv_status: 'ai_serving' }]]
+        return [{ user_id: '01d3be83f264', conv_status: 'ai_serving' }]
       }
       return [{ affectedRows: 0 }]
     }
   }
-  const service = createAccountSnapshotService({ sequelize, logger: { info() {} } })
-  await service.handle({
+  const service = createAccountSnapshotService({ sequelize: authorizedSnapshotDb(sequelize), logger: { info() {} } })
+  await service.handle({ nodeId: 11,
     envelope: { payload: { accounts: [{ accountId: 4, currentCustomerKey: '01d3be83f264' }] } }
   })
   assert.equal(registry.getCurrentKey(4), '01d3be83f264')
@@ -56,8 +80,8 @@ test('snapshot registers the current key so the TTL sweep can skip it', async ()
 test('snapshot does not register anything when the node cannot read the current conversation', async () => {
   resetRegistry()
   const sequelize = { query: async () => [[{ user_id: 'x', conv_status: 'ai_serving' }]] }
-  const service = createAccountSnapshotService({ sequelize, logger: { info() {} } })
-  const result = await service.handle({
+  const service = createAccountSnapshotService({ sequelize: authorizedSnapshotDb(sequelize), logger: { info() {} } })
+  const result = await service.handle({ nodeId: 11,
     envelope: { payload: { accounts: [{ accountId: 4, currentCustomerKey: '' }] } }
   })
   assert.equal(registry.getCurrentKey(4), null)
@@ -143,7 +167,7 @@ function createSnapshotStub({ known, activeKeys, currentKey, listReadable = true
     query: async (sql, options) => {
       // 注意：带 type: QueryTypes.SELECT 的查询，sequelize 直接返回行数组（不是 [rows, fields]）
       if (/SELECT user_id, conv_status/.test(sql)) return known
-      if (/SET conv_status = :status, pool_type = :pool/.test(sql)) {
+      if (/SET conv_status = CASE/.test(sql)) {
         restored.push(options.replacements.keys)
         return [{ affectedRows: options.replacements.keys.length }]
       }
@@ -151,12 +175,12 @@ function createSnapshotStub({ known, activeKeys, currentKey, listReadable = true
       return [{ affectedRows: options.replacements.keys.length }]
     }
   }
-  const service = createAccountSnapshotService({ sequelize, logger: { info() {} } })
+  const service = createAccountSnapshotService({ sequelize: authorizedSnapshotDb(sequelize), logger: { info() {} } })
   return {
     service,
     archived,
     restored,
-    run: () => service.handle({
+    run: () => service.handle({ nodeId: 11,
       envelope: {
         payload: {
           accounts: [{
@@ -223,7 +247,7 @@ test('keeps the current conversation when the list cannot be read', async () => 
 
   await stub.run()
 
-  assert.deepEqual(stub.archived, [['other']])
+  assert.deepEqual(stub.archived, [])
   assert.deepEqual(stub.restored, [['current']])
 })
 
@@ -238,13 +262,13 @@ test('an older node without the readable flag keeps the conservative behaviour',
   const sequelize = {
     query: async (sql, options) => {
       if (/SELECT user_id, conv_status/.test(sql)) return [{ user_id: 'current', conv_status: 'ai_serving' }]
-      if (/SET conv_status = :status, pool_type = :pool/.test(sql)) return [{ affectedRows: 1 }]
+      if (/SET conv_status = CASE/.test(sql)) return [{ affectedRows: 1 }]
       return [{ affectedRows: 0 }]
     }
   }
   const { createAccountSnapshotService } = require('./accountSnapshotService')
-  const service = createAccountSnapshotService({ sequelize, logger: { info() {} } })
-  const result = await service.handle({
+  const service = createAccountSnapshotService({ sequelize: authorizedSnapshotDb(sequelize), logger: { info() {} } })
+  const result = await service.handle({ nodeId: 11,
     envelope: { payload: { accounts: [{ accountId: 4, currentCustomerKey: 'current', activeConversationKeys: [] }] } }
   })
 

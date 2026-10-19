@@ -157,7 +157,7 @@ const connectDB = async () => {
     }
     // 迁移 role 字段为 ENUM
     try {
-      await sequelize.query(`ALTER TABLE users MODIFY COLUMN role ENUM('user','agent','supervisor','admin') DEFAULT 'user' COMMENT '角色（user/agent/supervisor/admin）'`)
+      await require('../modules/system-accounts/teamWorkspace.schema').ensureTeamWorkspaceSchema(sequelize)
       console.log('users.role ENUM 迁移完成')
     } catch (e) {
       console.log('users.role 迁移跳过:', e.message.split('\n')[0])
@@ -460,42 +460,6 @@ const connectDB = async () => {
     }
 
     // ---- 迁移：坐席在线状态表 ----
-    // ---- Migration: inbound message review queue ----
-    try {
-      await sequelize.query(`
-        CREATE TABLE IF NOT EXISTS message_review_items (
-          id CHAR(36) PRIMARY KEY,
-          conversation_id VARCHAR(36) NOT NULL,
-          primary_message_id VARCHAR(36) NOT NULL,
-          message_ids JSON NOT NULL,
-          status VARCHAR(20) NOT NULL DEFAULT 'pending',
-          risk_level VARCHAR(10) NOT NULL,
-          confidence DECIMAL(6,5) NULL,
-          reason_code VARCHAR(40) NOT NULL,
-          reason_text VARCHAR(500) NOT NULL DEFAULT '',
-          recommended_action VARCHAR(20) NOT NULL DEFAULT 'review',
-          rule_hits JSON NOT NULL,
-          model_name VARCHAR(100) NULL,
-          assigned_to INT NULL,
-          claimed_by INT NULL,
-          claimed_at DATETIME NULL,
-          resolved_by INT NULL,
-          resolution_reason VARCHAR(100) NULL,
-          outbound_message_id VARCHAR(36) NULL,
-          resolved_at DATETIME NULL,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-          UNIQUE KEY uk_review_primary_message (primary_message_id),
-          INDEX idx_review_assignee (status, assigned_to, created_at),
-          INDEX idx_review_risk (status, risk_level, created_at),
-          INDEX idx_review_conversation (conversation_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-      `)
-      console.log('message_review_items table ready')
-    } catch (e) {
-      console.log('message_review_items migration skipped:', e.message.split('\n')[0])
-    }
-
     try {
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS seat_status (
@@ -507,6 +471,7 @@ const connectDB = async () => {
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='坐席在线状态表'
       `)
+      await require('../modules/system-accounts/teamWorkspace.schema').ensureSeatPresenceSchema(sequelize)
       console.log('seat_status 表创建完成')
     } catch (e) {
       console.log('seat_status 表已存在，跳过')
@@ -565,13 +530,6 @@ const connectDB = async () => {
       { key: 'translation_context_message_count', value: '3', desc: '翻译时附带的最近消息条数（0=关闭上下文翻译，仅翻译单条消息）' },
       { key: 'rag_context_message_count', value: '0', desc: 'RAG检索时附带的最近消息条数（0=智能检测，仅短消息/代词时拼接；>0=总是拼接N条）' },
       { key: 'llm_context_message_count', value: '20', desc: 'AI推荐/自助回复时传给LLM的会话历史消息条数' },
-      { key: 'message_review_enabled', value: 'true', desc: 'Enable inbound message review' },
-      { key: 'message_review_model', value: '"deepseek-v4-flash"', desc: 'Inbound message review model' },
-      { key: 'message_review_allow_threshold', value: '0.85', desc: 'Minimum confidence for automatic pass-through' },
-      { key: 'message_review_context_count', value: '6', desc: 'Conversation context messages sent to the reviewer' },
-      { key: 'message_review_timeout_ms', value: '12000', desc: 'Message review model timeout in milliseconds' },
-      { key: 'message_review_merge_window_seconds', value: '30', desc: 'Pending message coalescing window in seconds' },
-      { key: 'message_review_assignment_timeout_seconds', value: '300', desc: 'Owner assignment fallback timeout in seconds' }
     ]
     for (const item of newConfigItems) {
       try {
@@ -1454,6 +1412,9 @@ const connectDB = async () => {
       console.error('SQL命令：DROP TABLE IF EXISTS threads, runs, documents, users;')
     }
   }
+
+  // Workspace backfill needs plat_messages and its sender columns on fresh installations.
+  await require('../modules/conversation-pool/workspace.service').ensureWorkspaceConversationSchema(sequelize)
 
   // The commerce sync worker must not start unless its persistent cursor table is ready.
   await ensureChannelSyncStateSchema(sequelize)

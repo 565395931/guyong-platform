@@ -20,6 +20,7 @@
  * - 不直接操作 Socket.IO，通过 eventEmitter 发事件给 pushService
  */
 
+const { isAiReplyEligible } = require('./aiReplyPolicy')
 const { sequelize } = require('../../config/database')
 const { INTERNAL_EVENTS } = require('../websocket/events')
 const { removePendingAiReplyJobs } = require('../../queues')
@@ -261,7 +262,7 @@ async function getSeatLoad(userId) {
   try {
     const [rows] = await sequelize.query(
       `SELECT COUNT(*) AS cnt FROM conversations
-       WHERE claimed_by = :userId AND pool_type = :poolType`,
+       WHERE claimed_by = :userId AND pool_type IN ('private','long_term') AND conv_status IN ('handling','following') AND status != 'closed'`,
       { replacements: { userId, poolType: POOL_TYPE.PRIVATE } }
     )
     return rows[0]?.cnt || 0
@@ -357,7 +358,7 @@ async function releaseOnSeatOffline(userId, eventEmitter) {
     for (const conv of conversations) {
       const result = await movePool({
         conversationId: conv.id,
-        targetPool: POOL_TYPE.PUBLIC,
+        targetPool: POOL_TYPE.PENDING_HUMAN,
         operatorId: userId,
         operatorName,
         operatorType: 'system',
@@ -427,7 +428,7 @@ async function movePool(params) {
   try {
     // 查询当前会话状态
     const [rows] = await sequelize.query(
-      `SELECT id, pool_type, conv_status, claimed_by FROM conversations WHERE id = :conversationId LIMIT 1`,
+      `SELECT id, pool_type, conv_status, status, ai_epoch, claimed_by FROM conversations WHERE id = :conversationId LIMIT 1`,
       { replacements: { conversationId } }
     )
 
@@ -437,6 +438,9 @@ async function movePool(params) {
 
     const conv = rows[0]
     const fromPool = conv.pool_type
+    if ((conv.status === 'closed' || conv.conv_status === 'archived') && !params.revive) return { success:false,message:'会话已归档，旧任务不得改变状态' }
+    if (params.expectedEpoch != null && Number(conv.ai_epoch) !== Number(params.expectedEpoch)) return { success:false,message:'AI任务已作废' }
+    if (operatorType === 'ai' && !isAiReplyEligible(conv)) return { success: false, message: '人工已接管或会话已结束' }
 
     // 已经在目标池，无需切换
     if (fromPool === targetPool && (targetPool !== POOL_TYPE.PRIVATE || conv.claimed_by === claimedBy)) {
@@ -459,7 +463,7 @@ async function movePool(params) {
       // 释放/转人工 → 公共池/待人工池，清除认领信息
       updateSql = `UPDATE conversations
                    SET pool_type = :targetPool, conv_status = :targetStatus,
-                       claimed_by = NULL, claimed_at = NULL,
+                       claimed_by = NULL, agent_id = NULL, claimed_at = NULL,
                        updated_at = NOW()
                    WHERE id = :conversationId`
       updateReplacements = { targetPool, targetStatus, conversationId }
@@ -474,7 +478,7 @@ async function movePool(params) {
       // 回到 AI 自助池
       updateSql = `UPDATE conversations
                    SET pool_type = :targetPool, conv_status = :targetStatus,
-                       claimed_by = NULL, claimed_at = NULL,
+                       claimed_by = NULL, agent_id = NULL, claimed_at = NULL,
                        updated_at = NOW()
                    WHERE id = :conversationId`
       updateReplacements = { targetPool, targetStatus, conversationId }
@@ -486,6 +490,9 @@ async function movePool(params) {
       updateReplacements = { targetPool, targetStatus, conversationId }
     }
 
+    updateSql = updateSql.replace('updated_at = NOW()', `status = 'open', ai_epoch = ai_epoch + 1, pending_since = ${targetPool === POOL_TYPE.PENDING_HUMAN ? 'NOW()' : 'NULL'}, updated_at = NOW()`)
+    updateSql += ' AND status <=> :fromLegacyStatus AND ai_epoch = :fromEpoch AND pool_type <=> :fromPool AND conv_status <=> :fromStatus AND claimed_by <=> :previousClaimed'
+    Object.assign(updateReplacements, { fromLegacyStatus: conv.status, fromEpoch: conv.ai_epoch || 0, fromPool, fromStatus: conv.conv_status, previousClaimed: conv.claimed_by ?? null })
     const [result] = await sequelize.query(updateSql, { replacements: updateReplacements })
 
     // 检查是否更新成功（affected rows）
@@ -510,7 +517,7 @@ async function movePool(params) {
     // 查询更新后的完整会话信息
     const [updatedRows] = await sequelize.query(
       `SELECT c.id, c.channel, c.account_id, c.user_id, c.user_name, c.agent_id,
-              c.pool_type, c.conv_status, c.claimed_by, c.claimed_at, c.priority,
+              c.pool_type, c.conv_status, c.ai_epoch, c.claimed_by, c.claimed_at, c.priority,
               c.last_reply_by, c.last_reply_time,
               c.last_message, c.last_message_time, c.unread_count, c.status, c.created_at,
               u.username AS agent_name,
@@ -525,7 +532,7 @@ async function movePool(params) {
 
     // 会话离开 AI 自助池后，清理尚未开始执行的 AI 自动回复残留任务。
     // 已经 active 的任务不能从 BullMQ 安全删除，会在 Worker/发送前再次校验池状态并跳过。
-    if (fromPool === POOL_TYPE.AI_SELF && targetPool !== POOL_TYPE.AI_SELF) {
+    if (isAiReplyEligible(conv) && !isAiReplyEligible({ pool_type: targetPool, conv_status: targetStatus, claimed_by: claimedBy })) {
       await removePendingAiReplyJobs(conversationId, `池流转 ${fromPool} -> ${targetPool}`)
     }
 
@@ -628,6 +635,7 @@ async function claimConversation(conversationId, seatId, seatName, eventEmitter,
     }
     clearPoolStatsCache()
 
+    await removePendingAiReplyJobs(conversationId, '人工已认领会话，停止AI回复')
     // 3. 记录日志
     await logPoolAction({
       conversationId,
@@ -643,7 +651,7 @@ async function claimConversation(conversationId, seatId, seatName, eventEmitter,
     // 4. 查询更新后的会话信息
     const [updatedRows] = await sequelize.query(
       `SELECT c.id, c.channel, c.account_id, c.user_id, c.user_name, c.agent_id,
-              c.pool_type, c.conv_status, c.claimed_by, c.claimed_at, c.priority,
+              c.pool_type, c.conv_status, c.ai_epoch, c.claimed_by, c.claimed_at, c.priority,
               c.last_reply_by, c.last_reply_time,
               c.last_message, c.last_message_time, c.unread_count, c.status, c.created_at,
               u.username AS agent_name
@@ -679,43 +687,17 @@ async function claimConversation(conversationId, seatId, seatName, eventEmitter,
 /**
  * 客服直接回复前确保会话归属。
  *
- * 公共/待人工/AI 池直接回复时，自动认领到当前客服私有池。
+ * 未认领的AI/待人工池允许手动补充回复，只有显式认领才转入人工池。
+ * 公共池直接回复时认领到当前客服私有池。
  * 本人长期跟进池直接回复时保持在长期跟进池，不转私有池。
  * 已归档会话不自动复活；已被其他客服私有/长期跟进的会话不静默抢走。
  */
 async function ensureClaimedForReply(conversationId, seatId, seatName, eventEmitter) {
-  const [rows] = await sequelize.query(
-    `SELECT id, pool_type, conv_status, claimed_by
-     FROM conversations
-     WHERE id = :conversationId
-     LIMIT 1`,
-    { replacements: { conversationId } }
-  )
-
-  if (rows.length === 0) {
-    return { success: false, message: '会话不存在' }
-  }
-
-  const conv = rows[0]
-  if (conv.conv_status === CONV_STATUS.ARCHIVED) {
-    return { success: false, message: '会话已归档，请先复活后再回复' }
-  }
-
-  if (conv.pool_type === POOL_TYPE.PRIVATE) {
-    if (!conv.claimed_by || Number(conv.claimed_by) === Number(seatId)) {
-      return { success: true, unchanged: true }
-    }
-    return { success: false, message: '该会话已被其他客服认领，请先转交或释放后再回复' }
-  }
-
-  if (conv.pool_type === POOL_TYPE.LONG_TERM) {
-    if (conv.claimed_by && Number(conv.claimed_by) !== Number(seatId)) {
-      return { success: false, message: '该长期跟进会话属于其他客服，请先转交后再回复' }
-    }
-    return { success: true, unchanged: true }
-  }
-
-  return claimConversation(conversationId, seatId, seatName, eventEmitter)
+  return require('./workspace.service').createWorkspaceService({sequelize,eventEmitter,
+    invalidateAi:async id=>{
+      await require('../../queues').markLatestAiReplyJob(id,'cancelled:'+require('node:crypto').randomUUID())
+      await removePendingAiReplyJobs(id,'人工发信接管')
+    }}).takeOver(conversationId,seatId,{countReply:true})
 }
 
 // ========== 公共 API：释放 ==========
@@ -754,7 +736,7 @@ async function releaseConversation(conversationId, seatId, seatName, eventEmitte
 
     const result = await movePool({
       conversationId,
-      targetPool: POOL_TYPE.PUBLIC,
+      targetPool: POOL_TYPE.PENDING_HUMAN,
       operatorId: seatId,
       operatorName: seatName,
       operatorType: 'agent',
@@ -768,7 +750,7 @@ async function releaseConversation(conversationId, seatId, seatName, eventEmitte
         conversationId,
         action: POOL_ACTION.RELEASE,
         fromPool,
-        toPool: POOL_TYPE.PUBLIC,
+        toPool: POOL_TYPE.PENDING_HUMAN,
         operatorId: seatId,
         operatorName: seatName,
         operatorType: 'agent',
@@ -860,10 +842,12 @@ async function archiveConversation(conversationId, seatId, seatName, eventEmitte
 
     await sequelize.query(
       `UPDATE conversations
-       SET conv_status = :archived, status = 'closed', updated_at = NOW()
+       SET conv_status = :archived, status = 'closed', ai_epoch = ai_epoch + 1, updated_at = NOW()
        WHERE id = :conversationId`,
       { replacements: { archived: CONV_STATUS.ARCHIVED, conversationId } }
     )
+    await require('../../queues').markLatestAiReplyJob(conversationId, 'archived:' + require('node:crypto').randomUUID())
+    await removePendingAiReplyJobs(conversationId, '会话已归档')
     clearPoolStatsCache()
 
     await logPoolAction({
@@ -922,7 +906,7 @@ async function transferConversation(conversationId, fromSeatId, fromSeatName, to
     const [result] = await sequelize.query(
       `UPDATE conversations
        SET pool_type = :privatePool, conv_status = :handlingStatus,
-           claimed_by = :toSeatId, claimed_at = NOW(),
+           agent_id = :toSeatId, claimed_by = :toSeatId, claimed_at = NOW(),
            updated_at = NOW()
        WHERE id = :conversationId AND claimed_by = :fromSeatId`,
       {
@@ -1098,9 +1082,9 @@ async function resolveLatestCustomerLanguage(conversationId) {
   }
 }
 
-async function buildAfterHoursTransferNotice(customerLanguage) {
+async function buildHandoffNotice(customerLanguage) {
   const configService = require('../../services/configService')
-  const baseNotice = await configService.getConfig('after_hours_transfer_notice', DEFAULT_AFTER_HOURS_TRANSFER_NOTICE)
+  const baseNotice = await configService.getConfig('handoff_notice_text', '正在为您转接技术同事，请您耐心等待。')
   const noticeText = typeof baseNotice === 'string' && baseNotice.trim()
     ? baseNotice.trim()
     : DEFAULT_AFTER_HOURS_TRANSFER_NOTICE
@@ -1123,16 +1107,17 @@ async function buildAfterHoursTransferNotice(customerLanguage) {
       return translated.trim()
     }
   } catch (err) {
-    console.error('[PoolService] 生成非工作时间转人工提示失败，回退中文:', err.message)
+    console.error('[PoolService] 生成转人工提示失败，回退中文:', err.message)
   }
 
   return noticeText
 }
 
-async function sendAfterHoursTransferNotice(conversationId, eventEmitter, customerLanguage = null) {
+async function sendHandoffNotice(conversationId, eventEmitter, customerLanguage = null, expectedEpoch = null) {
   try {
+    if (await require('../../services/configService').getConfig('handoff_notice_enabled', true) === false) return { success:true, message:'转人工提示已关闭' }
     const [rows] = await sequelize.query(
-      `SELECT channel, account_id, user_id
+      `SELECT channel, account_id, user_id, pool_type, conv_status, claimed_by
        FROM conversations
        WHERE id = :conversationId
        LIMIT 1`,
@@ -1140,7 +1125,7 @@ async function sendAfterHoursTransferNotice(conversationId, eventEmitter, custom
     )
 
     if (rows.length === 0) {
-      return { success: false, message: '会话不存在，无法发送非工作时间提示' }
+      return { success: false, message: '会话不存在，无法发送转接提示' }
     }
 
     const conv = rows[0]
@@ -1151,49 +1136,55 @@ async function sendAfterHoursTransferNotice(conversationId, eventEmitter, custom
     // 客户语言未知时，不发送通知，只做静默转人工
     // 避免把中文默认通知发给语言未知的客户（可能英语/阿拉伯语等）
     if (!langInfo || langInfo.code === 'unknown' || langInfo.group === 'unknown') {
-      console.log('[PoolService] 客户语言未知，跳过非工作时间通知发送，静默转人工')
+      console.log('[PoolService] 客户语言未知，跳过转接通知发送，静默转人工')
       return { success: true, message: '客户语言未知，跳过通知发送，静默转人工' }
     }
 
-    const noticeText = await buildAfterHoursTransferNotice(resolvedLanguage)
+    const noticeText = await buildHandoffNotice(resolvedLanguage)
 
-    // 语言兜底检查：即使上游 buildAfterHoursTransferNotice 已翻译，发送前再做一次安全网检查
+    // 语言兜底检查：即使上游 buildHandoffNotice 已翻译，发送前再做一次安全网检查
     const { ensureOutputLanguage } = require('../../services/languageGuard')
     const guardedNoticeText = await ensureOutputLanguage(noticeText, conversationId, resolvedLanguage)
 
+    const [freshRows] = await sequelize.query('SELECT pool_type, conv_status, status, ai_epoch, claimed_by FROM conversations WHERE id = :conversationId LIMIT 1', { replacements: { conversationId } })
+    if (freshRows[0]?.status === 'closed' || (expectedEpoch != null && Number(freshRows[0]?.ai_epoch) !== Number(expectedEpoch))) return {success:false,message:'旧转接提示已作废'}
+    if (freshRows[0]?.conv_status !== 'pending_claim' || freshRows[0]?.pool_type !== 'pending_human') return { success: false, message: '人工已接管或会话已结束，跳过转接提示' }
     const adapter = getChannelAdapterByChannel(conv.channel)
     const dispatcher = getDispatcher()
     const cloudPayload = {
       conversationId,
-      localMessageId: `system-${conversationId}-${Date.now()}`,
+      localMessageId: require('node:crypto').randomUUID(),
       channel: conv.channel,
       accountId: conv.account_id,
       targetUserId: conv.user_id,
       messageType: 'text',
       content: { text: guardedNoticeText }
     }
+    let outboundSendStatus = 'sent'
     if (dispatcher) {
       const sendResult = await dispatcher.dispatch(cloudPayload)
-      if (!sendResult.success) console.error('[PoolService] 统一出站分发非工作时间提示失败:', sendResult.error)
+      outboundSendStatus = sendResult.status === 'accepted' ? 'received' : 'sent'
+      if (!sendResult.success) return { success: false, message: '转接提示发送失败' }
     } else if (adapter && conv.channel === 'whatsapp') {
       const sendResult = await adapter.sendMessage(conv.account_id, conv.user_id, { content: { text: guardedNoticeText }, messageType: 'text' })
 
       if (!sendResult.success) {
-        console.error('[PoolService] 发送非工作时间转人工提示失败:', sendResult.error)
+        return { success: false, message: '转接提示发送失败' }
       }
-    }
+    } else { return { success: false, message: '渠道尚未连接，未发送转接提示' } }
 
     await getMessagingService().sendAiReply({
       id: cloudPayload.localMessageId,
       conversationId,
       content: { text: guardedNoticeText },
-      messageType: 'text'
+      messageType: 'text',
+      sendStatus: outboundSendStatus
     }, eventEmitter)
 
-    return { success: true, message: '非工作时间提示已发送' }
+    return { success: true, message: '转接提示已发送' }
   } catch (err) {
-    console.error('[PoolService] 发送非工作时间转人工提示失败:', err.message)
-    return { success: false, message: '发送非工作时间提示失败: ' + err.message }
+    console.error('[PoolService] 发送转人工提示失败:', err.message)
+    return { success: false, message: '发送转接提示失败: ' + err.message }
   }
 }
 
@@ -1207,7 +1198,7 @@ async function sendAfterHoursTransferNotice(conversationId, eventEmitter, custom
  * @param {EventEmitter} eventEmitter
  * @returns {Promise<{success: boolean, message: string}>}
  */
-async function aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage = null) {
+async function aiTransferToHuman(conversationId, reason, eventEmitter, customerLanguage = null, options = {}) {
   try {
     const result = await movePool({
       conversationId,
@@ -1216,14 +1207,12 @@ async function aiTransferToHuman(conversationId, reason, eventEmitter, customerL
       operatorName: 'AI',
       operatorType: 'ai',
       reason: reason || 'AI判断需人工介入',
+      expectedEpoch: options.expectedEpoch,
       eventEmitter
     })
 
     if (result.success) {
-      const businessHours = await getBusinessHoursStatus()
-      if (!businessHours.isBusinessHours) {
-        await sendAfterHoursTransferNotice(conversationId, eventEmitter, customerLanguage)
-      }
+      await sendHandoffNotice(conversationId, eventEmitter, customerLanguage, result.conversation?.ai_epoch)
 
       await logPoolAction({
         conversationId,
@@ -1265,7 +1254,7 @@ async function routeIncomingMessage(conversationId, message, eventEmitter) {
   try {
     // 查询会话当前池类型
     const [rows] = await sequelize.query(
-      `SELECT pool_type, conv_status, claimed_by FROM conversations WHERE id = :conversationId LIMIT 1`,
+      `SELECT pool_type, conv_status, status, ai_epoch, claimed_by FROM conversations WHERE id = :conversationId LIMIT 1`,
       { replacements: { conversationId } }
     )
 
@@ -1347,6 +1336,7 @@ async function routeIncomingMessage(conversationId, message, eventEmitter) {
       poolType: conv.pool_type || POOL_TYPE.PENDING_HUMAN,
       convStatus: conv.conv_status,
       claimedBy: conv.claimed_by,
+      aiEpoch: Number(conv.ai_epoch || 0),
       isNew: false
     }
   } catch (err) {
@@ -1361,72 +1351,39 @@ async function routeIncomingMessage(conversationId, message, eventEmitter) {
  * 获取各池的会话数量统计
  *
  * @param {number|null} seatId - 坐席 ID（私有池按坐席过滤）
- * @param {string} role - 用户角色（agent/supervisor/admin）
+ * @param {string} role - 用户角色（agent/admin）
  * @returns {Promise<Object>} { ai_self, pending_human, public, long_term, private, all }
  */
 async function getPoolStats(seatId, role) {
   try {
+    const { agentVisibility, minePredicate } = require('./workspacePolicy')
     const cacheKey = getPoolStatsCacheKey(seatId, role)
     const cached = poolStatsCache.get(cacheKey)
-    if (cached && Date.now() - cached.timestamp < POOL_STATS_CACHE_TTL_MS) {
-      return cached.data
-    }
-
-    let privateCondition = ''
-    let longTermCondition = ''
-    const replacements = {}
-
-    // 普通坐席只看自己的私有池和长期跟进池
-    if (role === 'agent' && seatId) {
-      privateCondition = 'AND claimed_by = :seatId'
-      longTermCondition = 'AND claimed_by = :seatId'
-      replacements.seatId = seatId
-    }
-
-    const [rows] = await sequelize.query(
-      `SELECT
-         SUM(CASE WHEN pool_type = 'ai_self' AND conv_status != 'archived' THEN 1 ELSE 0 END) AS ai_self,
-         SUM(CASE WHEN pool_type = 'pending_human' AND conv_status != 'archived' THEN 1 ELSE 0 END) AS pending_human,
-         SUM(CASE WHEN pool_type = 'public' AND conv_status != 'archived' THEN 1 ELSE 0 END) AS public_pool,
-         SUM(CASE WHEN pool_type = 'long_term' AND conv_status != 'archived' ${longTermCondition} THEN 1 ELSE 0 END) AS long_term,
-         SUM(CASE WHEN pool_type = 'private' AND conv_status != 'archived' ${privateCondition} THEN 1 ELSE 0 END) AS private_pool,
-         SUM(CASE WHEN conv_status = 'archived' THEN 1 ELSE 0 END) AS archived,
-         SUM(CASE WHEN conv_status != 'archived' THEN 1 ELSE 0 END) AS total
-       FROM conversations`,
-      { replacements }
-    )
-
-    // 按渠道的待人工数量：左侧渠道菜单要在「抖店」这类条目右边显示红点数字。
-    // 待人工是公共池，不按坐席过滤，全员看到同一个数字。
-    const [pendingRows] = await sequelize.query(
-      `SELECT channel, COUNT(*) AS pending_count
-         FROM conversations
-        WHERE pool_type = 'pending_human' AND conv_status != 'archived'
-        GROUP BY channel`
-    )
-
-    const stats = rows[0] || {}
-    const data = {
-      ai_self: stats.ai_self || 0,
-      pending_human: stats.pending_human || 0,
-      public: stats.public_pool || 0,
-      long_term: stats.long_term || 0,
-      private: stats.private_pool || 0,
-      archived: stats.archived || 0,
-      all: stats.total || 0,
-      pendingByChannel: Object.fromEntries(
-        pendingRows.map(row => [row.channel, Number(row.pending_count || 0)])
-      )
-    }
-    poolStatsCache.set(cacheKey, { data, timestamp: Date.now() })
-    if (poolStatsCache.size > 100) {
-      const firstKey = poolStatsCache.keys().next().value
-      poolStatsCache.delete(firstKey)
-    }
+    if (cached && Date.now()-cached.timestamp < POOL_STATS_CACHE_TTL_MS) return cached.data
+    const mine = minePredicate('c','seatId')
+    const visibility = role === 'agent' ? `WHERE ${agentVisibility('c','seatId')}` : ''
+    const open = "c.conv_status != 'archived' AND c.status != 'closed'"
+    const pending = role === 'agent' ? 'AND c.agent_id=:seatId' : ''
+    const myCondition = role === 'agent' ? mine : `(c.pool_type IN ('private','long_term') OR ${mine})`
+    const [rows] = await sequelize.query(`SELECT
+      SUM(CASE WHEN c.pool_type='ai_self' AND ${open} THEN 1 ELSE 0 END) AS ai_self,
+      SUM(CASE WHEN c.pool_type='pending_human' AND ${open} ${pending} THEN 1 ELSE 0 END) AS pending_human,
+      SUM(CASE WHEN ${myCondition} AND ${open} THEN 1 ELSE 0 END) AS private,
+      SUM(CASE WHEN c.conv_status='archived' OR c.status='closed' THEN 1 ELSE 0 END) AS archived,
+      SUM(CASE WHEN ${open} THEN 1 ELSE 0 END) AS total
+      FROM conversations c ${visibility}`, { replacements:{seatId:seatId||0} })
+    const [channels] = await sequelize.query(`SELECT c.channel,COUNT(*) AS count FROM conversations c
+      WHERE c.pool_type='pending_human' AND ${open} ${pending}
+        ${role === 'agent' ? `AND ${agentVisibility('c','seatId')}` : ''} GROUP BY c.channel`, {replacements:{seatId:seatId||0}})
+    const row=rows[0]||{}
+    const data={ai_self:Number(row.ai_self||0),pending_human:Number(row.pending_human||0),private:Number(row.private||0),
+      archived:Number(row.archived||0),all:Number(row.total||0),public:0,long_term:0,
+      pendingByChannel:Object.fromEntries(channels.map(c=>[c.channel,Number(c.count)]))}
+    poolStatsCache.set(cacheKey,{data,timestamp:Date.now()})
     return data
-  } catch (err) {
-    console.error('[PoolService] 获取池统计失败:', err.message)
-    return { ai_self: 0, pending_human: 0, public: 0, long_term: 0, private: 0, archived: 0, all: 0 }
+  } catch (error) {
+    console.error('[PoolService] 获取池统计失败:',error.message)
+    return {ai_self:0,pending_human:0,private:0,archived:0,all:0,public:0,long_term:0,pendingByChannel:{}}
   }
 }
 
@@ -1694,6 +1651,7 @@ async function reviveConversation(conversationId, seatId = null, seatName = '', 
       operatorName: seatName || '系统',
       operatorType: seatId ? 'agent' : 'system',
       reason: '手动复活归档会话',
+      revive: true,
       eventEmitter
     })
 

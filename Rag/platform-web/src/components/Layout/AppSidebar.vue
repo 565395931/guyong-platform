@@ -71,12 +71,6 @@
                 <el-icon><component :is="iconComponents[child.icon]" /></el-icon>
                 <template #title>
                   <span class="app-sidebar__item-label">{{ child.label }}</span>
-                  <el-badge
-                    v-if="child.badge === 'review'"
-                    class="app-sidebar__review-badge"
-                    :value="formatReviewCount(reviewCount)"
-                    :hidden="reviewCount === 0"
-                  />
                 </template>
               </el-menu-item>
             </template>
@@ -128,9 +122,6 @@ import { useUserStore } from '@/stores/user'
 import { useConversationStore } from '@/stores/conversation'
 import { buildSidebarMenu } from '@/modules/navigation/channelNavigation'
 import { useChannelHealth } from '@/modules/channels/channelHealth'
-import { createReviewCounter, formatReviewCount } from '@/modules/navigation/reviewCount'
-import { getReviewStats } from '@/api/messageReviews'
-import { websocketService } from '@/api/websocket'
 
 const route = useRoute()
 const settingsStore = useSettingsStore()
@@ -140,19 +131,15 @@ defineEmits(['close-mobile'])
 const isMobile = ref(false)
 const mobileQuery = window.matchMedia('(max-width: 900px)')
 const syncMobile = event => { isMobile.value = event.matches }
-const reviewCounter = createReviewCounter({ fetchStats: getReviewStats, websocket: websocketService })
-const reviewCount = reviewCounter.count
 onMounted(() => {
   syncMobile(mobileQuery)
   mobileQuery.addEventListener('change', syncMobile)
-  reviewCounter.start()
   channelHealth.startPolling()
   // 池统计里包含"按渠道的待人工数量"，进入时拉一次；之后由 WebSocket 的 pool_stats_update 刷新
   conversationStore.fetchPoolStats()
 })
 onBeforeUnmount(() => {
   mobileQuery.removeEventListener('change', syncMobile)
-  reviewCounter.stop()
   channelHealth.stopPolling()
 })
 const sidebarCollapsed = computed(() => settingsStore.sidebarCollapsed && !isMobile.value)
@@ -197,9 +184,9 @@ const expandForRoute = path => {
   const next = new Set(expandedKeys.value)
   if (path === '/platform-messages') next.add('platform-messages')
   if (path === '/customer-service-accounts') next.add('customer-service-accounts')
-  if (['/platform-messages', '/customer-service-accounts', '/message-reviews'].includes(path)) next.add('customer-work')
+  if (['/platform-messages', '/customer-service-accounts'].includes(path)) next.add('customer-work')
   if (path.startsWith('/statistics') || ['/campaigns', '/video', '/orders', '/catalog', '/warehouses', '/customers'].includes(path)) next.add('business-operations')
-  if (path === '/settings/ai' || path === '/settings/accounts' || path === '/settings/video-data' || path === '/modules') next.add('system-settings')
+  if (path === '/settings/ai' || path === '/settings/model-test' || path === '/settings/accounts' || path === '/settings/video-data' || path === '/modules') next.add('system-settings')
   expandedKeys.value = next
 }
 watch(() => route.path, expandForRoute, { immediate: true })
@@ -376,18 +363,6 @@ const menuItems = computed(() => buildSidebarMenu(userStore.userInfo?.role))
   }
 
   &__pending-badge {
-    flex-shrink: 0;
-    margin-left: auto;
-
-    :deep(.el-badge__content) {
-      position: static;
-      transform: none;
-      border: 0;
-      background: #ef4444;
-    }
-  }
-
-  &__review-badge {
     flex-shrink: 0;
     margin-left: auto;
 

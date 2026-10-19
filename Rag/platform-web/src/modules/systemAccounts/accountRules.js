@@ -1,4 +1,4 @@
-export const ACCOUNT_ROLES = Object.freeze(['admin', 'supervisor', 'agent'])
+export const ACCOUNT_ROLES = Object.freeze(['admin', 'agent'])
 export const ACCOUNT_STATUSES = Object.freeze(['active', 'disabled'])
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/

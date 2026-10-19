@@ -12,7 +12,7 @@ function requireRoles(roles) {
 
 function createLegacyAdminRouter({ controller, authenticate = createAuthenticate() }) {
   const router = express.Router()
-  router.use(authenticate, requireRoles(['admin', 'supervisor']))
+  router.use(authenticate, requireRoles(['admin']))
   router.get('/stats', controller.getStats)
   router.get('/seat-skill-tags', controller.getSeatSkillTags)
   router.post('/seat-skill-tags', controller.createSeatSkillTag)

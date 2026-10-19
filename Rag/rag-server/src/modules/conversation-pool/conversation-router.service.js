@@ -209,7 +209,7 @@ async function checkComplexity(messageText, config) {
     const userMessage = `客户消息：${messageText}`
 
     // 使用独立的 ChatOpenAI 调用（非流式），确保分类 prompt 被正确传递
-    const chatModel = createChatModelFn({
+    const chatModel = await createChatModelFn({
       model,
       temperature: 0.1,
       maxTokens: 200,

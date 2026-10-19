@@ -406,7 +406,7 @@ const profileSignals = computed(() => normalizeProfileSignals(data.value?.aiProf
 const communicationDays = computed(() => [...(data.value?.communicationDays || [])].sort((a, b) =>
   String(b.communication_date).localeCompare(String(a.communication_date))))
 const currentUserId = computed(() => Number(userStore.userInfo?.id || userStore.userInfo?.userId || 0))
-const isPrivileged = computed(() => ['admin', 'supervisor'].includes(userStore.userInfo?.role))
+const isPrivileged = computed(() => ['admin'].includes(userStore.userInfo?.role))
 const canOperate = computed(() => {
   if (!data.value) return false
   if (isPrivileged.value) return true

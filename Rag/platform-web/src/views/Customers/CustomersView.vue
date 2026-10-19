@@ -240,7 +240,7 @@ import { normalizeDailyReport, stageLabel } from '@/modules/customers/customerRe
 const router = useRouter()
 const userStore = useUserStore()
 const role = computed(() => userStore.userInfo?.role || 'user')
-const isPrivileged = computed(() => ['admin', 'supervisor'].includes(role.value))
+const isPrivileged = computed(() => ['admin'].includes(role.value))
 
 const activeView = ref('customers')
 const loading = ref(false)

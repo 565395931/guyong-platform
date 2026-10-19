@@ -1,0 +1,112 @@
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('fs')
+const path = require('path')
+const os = require('os')
+const { FileSaasStore } = require('../src/saas/fileSaasStore')
+const { createSecretCipher } = require('../src/saas/secretCipher')
+const Messaging = require('../src/saas/cloudMessagingService')
+const { ShopCustomerOrders, summary, orderId } = require('../src/saas/shopCustomerOrders')
+const { createWechatShopClient } = require('../src/saas/wechatShopClient')
+async function fixture(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shop-context-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const store = new FileSaasStore(path.join(dir, 'data.json'))
+  const cipher = createSecretCipher(Buffer.alloc(32, 4).toString('base64'))
+  await store.transaction(data => data.shopInstallations.push({ id: 'shop-a', tenantId: 'tenant-a', appId: 'wx-a' }, { id: 'shop-b', tenantId: 'tenant-b', appId: 'wx-b' }))
+  const messaging = new Messaging({ store, cipher })
+  const inbound = { channel: 'wechat_shop', shopInstallationId: 'shop-a', openKfId: 'wx-a', externalUserId: 'buyer-a', channelMessageId: 'msg-1', text: '你好' }
+  const message = await messaging.ingestInbound(inbound)
+  const calls = []; let now = Date.parse('2026-10-09T12:00:00Z')
+  const shop = { accessToken: async () => 'fixture-token', client: {
+    listOrders: async input => { calls.push(input); return { order_id_list: ['90071992547409931'], has_more: false } },
+    getOrder: async input => ({ order: { order_id: input.orderId, openid: 'buyer-a', status: 20, create_time: Math.floor(now / 1000), order_detail: { price_info: { order_price: 1234 }, product_infos: [{ title: '隔热膜', sku_cnt: 1 }] } } })
+  } }
+  const orders = new ShopCustomerOrders({ store, cipher, shop, now: () => now })
+  return { store, messaging, inbound, id: message.conversationId, orders, shop, calls, clock: value => { now = value } }
+}
+test('legacy remote remarks no longer appear in inbox and new callbacks do not create profiles', async t => {
+  const f = await fixture(t)
+  await f.store.transaction(data => data.customerProfiles.push({ channel: 'wechat_shop', tenantId: 'tenant-a', installationId: 'shop-a', externalUserId: 'buyer-a', remark: '张先生｜汽车隔热膜咨询', tags: ['新客'], revision: 1 }))
+  await f.messaging.ingestInbound(f.inbound)
+  await f.store.transaction(data => { data.conversations[0].externalUserId = 'old-conversation' })
+  const second = await f.messaging.ingestInbound({ ...f.inbound, channelMessageId: 'msg-2' })
+  const inbox = await f.messaging.inbox(second.conversationId)
+  assert.notEqual(inbox.selected.customerName, '张先生｜汽车隔热膜咨询')
+  assert.equal(inbox.selected.customerProfile, undefined)
+  const other = await f.messaging.ingestInbound({ ...f.inbound, shopInstallationId: 'shop-b', openKfId: 'wx-b' })
+  assert.equal((await f.messaging.inbox(other.conversationId)).selected.customerProfile, undefined)
+  assert.equal((await f.store.snapshot()).customerProfiles.length, 1)
+  assert.equal(JSON.stringify((await f.store.snapshot()).auditEntries).includes('张先生'), false)
+})
+test('retired remote profile writes reject without changing data', async t => {
+  const f = await fixture(t)
+  const before = await f.store.snapshot()
+  await assert.rejects(f.messaging.saveCustomerProfile(f.id, { remark: '甲', tags: [], revision: 0 }), { code: 'customer_profile_retired' })
+  assert.deepEqual(await f.store.snapshot(), before)
+})
+test('legacy inbox remains readable without profile storage', async t => {
+  const f = await fixture(t)
+  await f.store.transaction(data => { delete data.customerProfiles })
+  assert.equal((await f.messaging.inbox(f.id)).selected.customerProfile, undefined)
+  await assert.rejects(f.messaging.saveCustomerProfile(f.id, { remark: '老客户', tags: [], revision: 0 }), { code: 'customer_profile_retired' })
+})
+test('orders use buyer filter, bounded seven days and string IDs; privacy is whitelisted', async t => {
+  const f = await fixture(t)
+  const result = await f.orders.list(f.id, {}, 'operator')
+  assert.equal(result.orders[0].orderId, '90071992547409931')
+  assert.equal(result.orders[0].totalFen, 1234)
+  assert.equal(f.calls[0].openId, 'buyer-a')
+  assert.equal(f.calls[0].endTime - f.calls[0].startTime, 7 * 86400)
+  assert.equal(result.cursor, null)
+  const privateOrder = { order_id: '123', openid: 'buyer-a', order_detail: { delivery_info: { user_name: '秘密名字', tel_number: '秘密电话' } }, user_info: { nickname: '订单昵称', head_img_url: 'https://private.example' } }
+  const encoded = JSON.stringify(summary(privateOrder, 'buyer-a'))
+  for (const value of ['秘密名字', '秘密电话', 'head_img_url', 'https://private.example']) assert.equal(encoded.includes(value), false)
+  assert.equal(summary(privateOrder, 'buyer-a').orderUser.source, 'order_user_info')
+  assert.throws(() => orderId(90071992547409930), { code: 'shop_order_invalid' })
+})
+test('forwarded order cards are verified and partial unavailable results stay explicit', async t => {
+  const f = await fixture(t)
+  await f.store.transaction(data => { data.messages[0].shopDetails = { orderId: '444' } })
+  f.shop.client.getOrder = async ({ orderId }) => { if (orderId === '444') return { order: { order_id: '444', openid: 'another-buyer', unionid: 'same-unionid' } }; throw new Error('temporary') }
+  const result = await f.orders.list(f.id)
+  assert.deepEqual(result.orders, [])
+  assert.equal(result.unrelatedCount, 1); assert.equal(result.unavailableCount, 1)
+})
+test('gift relationship never exposes recipient nickname to giver', () => {
+  const gift = { order_id: '123', is_present: true, openid: 'recipient', present_giver_openid: 'giver', user_info: { nickname: '收件人名字' } }
+  assert.equal(summary(gift, 'giver').relationship, 'gift_giver')
+  assert.equal(summary(gift, 'giver').orderUser, undefined)
+  assert.equal(summary(gift, 'recipient').relationship, 'gift_recipient')
+  assert.throws(() => summary(gift, 'other'), { code: 'shop_order_unrelated' })
+})
+test('cursor is authenticated, conversation-bound and expires without upstream request', async t => {
+  const f = await fixture(t)
+  f.shop.client.listOrders = async input => { f.calls.push(input); return { order_id_list: [], has_more: true, next_key: input.nextKey ? 'next-2' : 'next-1' } }
+  const first = await f.orders.list(f.id)
+  assert.ok(first.cursor); assert.equal(first.cursor.includes('buyer-a'), false)
+  await f.orders.list(f.id, { cursor: first.cursor })
+  assert.equal(f.calls[1].nextKey, 'next-1')
+  await assert.rejects(f.orders.list(f.id, { cursor: first.cursor + 'corrupt' }), { code: 'shop_order_invalid' })
+  const other = await f.messaging.ingestInbound({ ...f.inbound, channelMessageId: 'other', externalUserId: 'other' })
+  await assert.rejects(f.orders.list(other.conversationId, { cursor: first.cursor }), { code: 'shop_order_invalid' })
+  f.clock(Date.parse('2026-10-09T12:16:00Z'))
+  await assert.rejects(f.orders.list(f.id, { cursor: first.cursor }), { code: 'shop_order_invalid' })
+  assert.equal(f.calls.length, 2)
+})
+test('account mismatch is rejected before token lookup', async t => {
+  const f = await fixture(t)
+  await f.store.transaction(data => { data.conversations[0].tenantId = 'tenant-b' })
+  await assert.rejects(f.orders.list(f.id), { code: 'conversation_not_found' })
+  assert.equal(f.calls.length, 0)
+})
+test('official order endpoints send exact documented field names', async () => {
+  const calls = []
+  const client = createWechatShopClient({ fetchImpl: async (url, options) => { calls.push({ url, ...JSON.parse(options.body) }); return new Response(JSON.stringify({ errcode: 0, order_id_list: [] })) } })
+  await client.listOrders({ accessToken: 'fixture', openId: 'buyer', startTime: 1, endTime: 2 })
+  await client.getOrder({ accessToken: 'fixture', orderId: '90071992547409931' })
+  assert.equal(new URL(calls[0].url).pathname, '/channels/ec/order/list/get')
+  assert.equal(calls[0].openid, 'buyer'); assert.equal(calls[0].page_size, 20)
+  assert.deepEqual(calls[0].create_time_range, { start_time: 1, end_time: 2 })
+  assert.equal(calls[1].order_id, '90071992547409931')
+})

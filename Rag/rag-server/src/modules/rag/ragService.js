@@ -24,18 +24,10 @@ const DASHSCOPE_MODEL = process.env.DASHSCOPE_MODEL || 'qwen-plus';
 
 // ========== 初始化 OpenAI 客户端（延迟初始化，避免模块加载时环境变量未就绪） ==========
 let openai = null;
-function getOpenAI() {
-  if (!openai) {
-    const apiKey = process.env.DASHSCOPE_API_KEY || DASHSCOPE_API_KEY;
-    if (!apiKey) {
-      throw new Error('DASHSCOPE_API_KEY 未配置，请检查 .env 文件');
-    }
-    openai = new OpenAI({
-      apiKey,
-      baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1'
-    });
-  }
-  return openai;
+async function getOpenAI() {
+  const config = await require('../ai-provider/providerService').getProviderService().getRuntimeConfig();
+  return new OpenAI({ apiKey: config.apiKey, baseURL: config.baseURL, maxRetries: 0, fetch: async (url, init) => { const response = await fetch(url, init); require('../ai-provider/serviceMonitor').observeBalance(config, response); return response },
+    defaultHeaders: { 'idempotency-key': crypto.randomUUID() } });
 }
 
 /**
@@ -73,7 +65,7 @@ async function uploadFileToKnowledgeBase(filePath, originalFileName, knowledgeMe
   const scopedUpload = prepareScopedUploadFile(filePath, originalFileName, knowledgeMetadata);
   const uploadPath = scopedUpload.filePath;
   const { md5: fileMd5, size: fileSize } = getFileInfo(uploadPath);
-  
+
   // 使用传入的原始文件名，或从路径提取
   const fileName = originalFileName || getFileInfo(filePath).fileName;
 
@@ -357,6 +349,17 @@ async function deleteIndexDocument(documentIds, indexId = INDEX_ID) {
  * @param {number} options.rerankMinScore - 相似度阈值，默认0.2
  */
 async function retrieve(options) {
+  const apiSearch = require('../ai-provider/bailianSearchService').getBailianSearchService();
+  const searchStatus = await apiSearch.getStatus();
+  if (searchStatus.enabled === false) return {nodes:[],disabled:true};
+  if (searchStatus.method === 'api-key') {
+    if (options.searchFilters) throw new Error('当前 API Key 检索不支持 SDK SearchFilters，请使用知识库标签隔离');
+    const { query,channel,knowledgeScope,knowledgeChannels,rerankTopN=5 }=options;
+    const filter=channel || knowledgeScope || knowledgeChannels ? buildAllowedKnowledgeFilter(channel,{knowledgeScope,knowledgeChannels}) : null;
+    const result=await apiSearch.search(query,{topK:filter ? 20 : rerankTopN,indexId:options.indexId});
+    const mapped=await Promise.all(result.nodes.map(node=>mapRetrieveNode(node)));
+    return { ...result,nodes:filter ? mapped.filter(node=>isKnowledgeNodeAllowed(node,filter)).slice(0,rerankTopN) : mapped };
+  }
   const client = createClient();
   const runtime = new Util.RuntimeOptions({});
 
@@ -482,6 +485,8 @@ async function ragChat(options) {
 ${context}`
     : '你是一个智能助手，请根据你的知识如实回答用户问题，如果搜索不到相关信息如实回答不要编造信息。';
 
+  const runtime = await require('../ai-provider/providerService').getProviderService().getRuntimeConfig();
+  const selectedModel = runtime.provider === 'openai-compatible' ? runtime.model : model;
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: query }
@@ -500,8 +505,8 @@ ${context}`
   try {
     if (stream) {
       // 流式输出
-      const streamResponse = await getOpenAI().chat.completions.create({
-        model,
+      const streamResponse = await (await getOpenAI()).chat.completions.create({
+        model: selectedModel,
         messages,
         stream: true
       });
@@ -515,8 +520,8 @@ ${context}`
       };
     } else {
       // 非流式输出
-      const response = await getOpenAI().chat.completions.create({
-        model,
+      const response = await (await getOpenAI()).chat.completions.create({
+        model: selectedModel,
         messages,
         stream: false
       });

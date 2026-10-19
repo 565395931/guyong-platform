@@ -16,6 +16,7 @@ import { getChannelsStatus } from '@/api/channels'
 const REFRESH_MS = 60000
 
 const channels = ref([])
+const remoteShopAccounts = ref([])
 const overall = ref('UNKNOWN')
 const loaded = ref(false)
 const loading = ref(false)
@@ -34,6 +35,7 @@ async function fetchChannelHealth() {
       const res = await getChannelsStatus()
       const data = res?.data || {}
       channels.value = Array.isArray(data.channels) ? data.channels : []
+      remoteShopAccounts.value = Array.isArray(data.remoteShopAccounts) ? data.remoteShopAccounts : []
       overall.value = data.overall || 'UNKNOWN'
       loaded.value = true
     } catch (err) {
@@ -92,6 +94,7 @@ function channelStatusText(channel) {
 export function useChannelHealth() {
   return {
     channels,
+    remoteShopAccounts,
     overall,
     loaded,
     loading,
@@ -110,6 +113,7 @@ export function __resetChannelHealth() {
   subscribers = 0
   inflight = null
   channels.value = []
+  remoteShopAccounts.value = []
   overall.value = 'UNKNOWN'
   loaded.value = false
 }

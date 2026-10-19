@@ -112,7 +112,7 @@ function getOrCreateAgent(model, tools = []) {
 }
 
 // ========== 初始化 LangChain ChatOpenAI（阿里云百炼兼容模式） ==========
-function createChatModel(options = {}) {
+async function createChatModel(options = {}) {
   const {
     model = 'qwen-plus',
     temperature = 0.7,
@@ -127,10 +127,7 @@ function createChatModel(options = {}) {
     streaming,
     // apiKey / baseURL 都**现取** process.env：配置页保存时会同步过来，
     // 写成模块级常量就成了"改了要重启"（原来 baseURL 就是读死的）。
-    apiKey: process.env.DASHSCOPE_API_KEY,
-    configuration: {
-      baseURL: process.env.DASHSCOPE_BASE_URL || DASHSCOPE_BASE_URL
-    }
+    ...await require('../ai-provider/modelRuntime').runtimeOptions(model)
   });
 }
 
@@ -147,7 +144,7 @@ function createChatModel(options = {}) {
 async function enhancedRagChatStream(query, threadId, contextDocs = [], options = {}) {
   const { model = 'qwen-plus', temperature = 0.7, maxContextTokens = 2000, tools = [] } = options;
 
-  const chatModel = createChatModel({ model, temperature, streaming: true });
+  const chatModel = await createChatModel({ model, temperature, streaming: true });
 
   // 构建上下文（不注入到 messages，而是通过 context 传递）
   let contextText = '';
@@ -204,7 +201,7 @@ async function* enhancedRagChatStreamGenerator(query, threadId, contextDocs = []
   const { model = 'qwen-plus', temperature = 0.7, maxContextTokens = 2000, tools = [] } = options;
 
   try {
-    const chatModel = createChatModel({ model, temperature, streaming: true });
+    const chatModel = await createChatModel({ model, temperature, streaming: true });
 
     // ---- 构建 RAG 参考资料（保留原有截断逻辑） ----
     let contextText = '';
@@ -242,6 +239,7 @@ async function* enhancedRagChatStreamGenerator(query, threadId, contextDocs = []
 
     // ---- 遍历消息流，转换为标准格式（服务层说内部方言）----
     let messageCount = 0;
+    let replyProduced = false;
     for await (const msg of runStream.messages) {
       messageCount++;
       console.log('[Generator] 收到消息 #', messageCount, 'node:', msg.node);
@@ -258,6 +256,7 @@ async function* enhancedRagChatStreamGenerator(query, threadId, contextDocs = []
       let tokenCount = 0;
       for await (const token of msg.text) {
         tokenCount++;
+        if (String(token).trim()) replyProduced = true;
         console.log('[Generator] 产出 token #', tokenCount, '长度:', token.length);
         yield { type: 'text', content: token };
       }
@@ -265,6 +264,7 @@ async function* enhancedRagChatStreamGenerator(query, threadId, contextDocs = []
       console.log('[Generator] 消息 #', messageCount, '产出', tokenCount, '个 token');
     }
 
+    if (replyProduced) await require('../ai-provider/serviceMonitor').recordReply(true);
     console.log('[Generator] 完成，共处理', messageCount, '条消息');
 
     // ---- 检查是否有 HITL 中断（桌面操作需用户确认）----
@@ -287,6 +287,7 @@ async function* enhancedRagChatStreamGenerator(query, threadId, contextDocs = []
     }
 
   } catch (error) {
+    await require('../ai-provider/serviceMonitor').recordReply(false);
     console.error('[Generator] 错误:', error.message);
     yield {
       type: 'error',
@@ -309,7 +310,7 @@ async function* resumeStreamGenerator(threadId, decisions, options = {}) {
   const { model = 'qwen-plus', temperature = 0.7, tools = [] } = options;
 
   try {
-    const chatModel = createChatModel({ model, temperature, streaming: true });
+    const chatModel = await createChatModel({ model, temperature, streaming: true });
     const { agent } = getOrCreateAgent(chatModel, tools);
 
     console.log('[Resume] 开始恢复 streamEvents...');
@@ -325,6 +326,7 @@ async function* resumeStreamGenerator(threadId, decisions, options = {}) {
     console.log('[Resume] streamEvents 返回，类型:', runStream.constructor?.name);
 
     let messageCount = 0;
+    let replyProduced = false;
     for await (const msg of runStream.messages) {
       messageCount++;
       console.log('[Resume] 收到消息 #', messageCount, 'node:', msg.node);
@@ -338,6 +340,7 @@ async function* resumeStreamGenerator(threadId, decisions, options = {}) {
       let tokenCount = 0;
       for await (const token of msg.text) {
         tokenCount++;
+        if (String(token).trim()) replyProduced = true;
         console.log('[Resume] 产出 token #', tokenCount, '长度:', token.length);
         yield { type: 'text', content: token };
       }
@@ -345,6 +348,7 @@ async function* resumeStreamGenerator(threadId, decisions, options = {}) {
       console.log('[Resume] 消息 #', messageCount, '产出', tokenCount, '个 token');
     }
 
+    if (replyProduced) await require('../ai-provider/serviceMonitor').recordReply(true);
     console.log('[Resume] 完成，共处理', messageCount, '条消息');
 
     // 再次检查是否有新的中断
@@ -365,6 +369,7 @@ async function* resumeStreamGenerator(threadId, decisions, options = {}) {
     }
 
   } catch (error) {
+    await require('../ai-provider/serviceMonitor').recordReply(false);
     console.error('[Resume] 错误:', error.message);
     yield {
       type: 'error',
@@ -381,7 +386,7 @@ async function* resumeStreamGenerator(threadId, decisions, options = {}) {
 async function processDataChain(input, options = {}) {
   const { model = 'qwen-plus' } = options;
 
-  const chatModel = createChatModel({ model });
+  const chatModel = await createChatModel({ model });
 
   // 定义处理步骤
   const analyzePrompt = PromptTemplate.fromTemplate(
@@ -441,7 +446,7 @@ async function* generateRecommendationStream(query, history = [], contextDocs = 
   const { model = 'qwen-plus', temperature = 0.7, maxContextTokens = 4000, customerLang = null, customerLangCode = null, customerLangLabel = null, systemPromptOverride = null, systemPromptAppend = null, langMode = null } = options;
 
   try {
-    const chatModel = createChatModel({ model, temperature, streaming: true });
+    const chatModel = await createChatModel({ model, temperature, streaming: true });
 
     // ---- 构建 RAG 参考资料文本 ----
     let contextText = '';
@@ -467,8 +472,7 @@ async function* generateRecommendationStream(query, history = [], contextDocs = 
       systemPrompt = systemPromptOverride
     } else {
       const configService = require('../../services/configService');
-      const baseSystemPrompt = await configService.getConfig('ai_suggest_system_prompt') ||
-        `你是客服坐席的智能助手，负责根据用户消息和知识库资料生成推荐回复。`;
+      const baseSystemPrompt = (await require('../ai-provider/providerService').getProviderService().getReplySettings()).systemPrompt || '';
 
       // 语言模式：
       // - 'bilingual'（推荐回答场景）：非中文客户追加 ===CN=== 双语格式指令，生成原语言回复+中文翻译供坐席审核
@@ -493,7 +497,7 @@ async function* generateRecommendationStream(query, history = [], contextDocs = 
 
       const outputSafetySuffix = `\n\n【客户输出安全指令（必须遵守）】\n历史消息中可能出现 "[AI回复]"、"[人工回复]" 等来源标记，这些只供你理解上下文来源。\n最终回复必须像真人客服直接发给客户的消息，禁止输出任何来源标记、系统标签、角色标签或解释性前缀。`;
 
-      systemPrompt = `${baseSystemPrompt}\n\n${contextText}${langSuffix}${outputSafetySuffix}`;
+      systemPrompt = `${baseSystemPrompt}${langSuffix}${outputSafetySuffix}`;
       // systemPromptAppend：追加指令（不替换整个系统提示词），用于谨慎回答模式等场景
       if (systemPromptAppend) {
         systemPrompt += `\n\n${systemPromptAppend}`;
@@ -501,6 +505,16 @@ async function* generateRecommendationStream(query, history = [], contextDocs = 
     }
 
     // ---- 构建消息数组（System + History + Query）----
+    const structuredReply = options.structuredReply ?? !systemPromptOverride;
+    const replyProtocol = require('../ai-provider/replyProtocol');
+    const replyContext = require('../ai-provider/replyContext');
+    if (structuredReply) {
+      const provider = require('../ai-provider/providerService').getProviderService();
+      const settings = await provider.getReplySettings();
+      systemPrompt = replyContext.composeReplySystem(settings.systemPrompt,await provider.getChannelPrompt(options.channel),await provider.getDefaultPromptTemplate());
+      history = replyContext.retainReplyHistory(history,settings.contextMessageCount,{currentContent:query,excludeTrailingCurrent:options.historyIncludesCurrent === true});
+    }
+    if (!structuredReply && !systemPromptOverride) systemPrompt += '\n\n' + contextText;
     const messages = [new SystemMessage(systemPrompt)];
 
     // 将历史消息转为 LangChain 消息对象
@@ -516,7 +530,7 @@ async function* generateRecommendationStream(query, history = [], contextDocs = 
     }
 
     // 当前需要推荐的用户消息
-    messages.push(new HumanMessage(query));
+    messages.push(new HumanMessage(structuredReply ? replyContext.attachCurrentReferences(query,contextDocs,maxContextTokens) : query));
 
     console.log('[Recommendation] 消息数组构建完成，总消息数:', messages.length, '系统提示词长度:', systemPrompt.length, '客户语言:', customerLang || 'unknown', '语言模式:', langMode || 'bilingual');
 
@@ -540,6 +554,8 @@ async function* generateRecommendationStream(query, history = [], contextDocs = 
       if (!token) continue;
       tokenCount++;
       fullRaw += token;
+      // Customer replies are exposed only after the complete JSON has been validated.
+      if (structuredReply) continue;
 
       if (!delimFound) {
         const m = DELIM_REGEX.exec(fullRaw);
@@ -564,6 +580,17 @@ async function* generateRecommendationStream(query, history = [], contextDocs = 
       // 分隔符之后的文本静默累积，最后统一 yield
     }
 
+    if (structuredReply) {
+      const decision = replyProtocol.parseReplyDecision(fullRaw);
+      const delimiter = DELIM_REGEX.exec(decision.reply);
+      const reply = delimiter ? decision.reply.slice(0, delimiter.index).trim() : decision.reply;
+      const translated = delimiter ? decision.reply.slice(delimiter.index + delimiter[0].length).trim() : '';
+      yield { type:'decision', action:decision.action, reason:decision.reason };
+      yield { type:'text', content:reply };
+      if (translated) yield { type:'cn_version',content:translated };
+      if (options.trackReplyHealth !== false) await require('../ai-provider/serviceMonitor').recordReply(true);
+      return;
+    }
     if (!delimFound) {
       // 模型未输出任何分隔符变体 → 全部作为 text 输出
       if (textYieldedUpTo < fullRaw.length) {
@@ -591,9 +618,11 @@ async function* generateRecommendationStream(query, history = [], contextDocs = 
       yield { type: 'cn_version', content: cnText };
     }
 
+    if (options.trackReplyHealth !== false && (!options.systemPromptOverride || options.trackReplyHealth === true)) await require('../ai-provider/serviceMonitor').recordReply(Boolean(fullRaw.trim()));
     console.log('[Recommendation] 完成，token:', tokenCount, '双语:', delimFound, '中文长度:', cnText.length);
 
   } catch (error) {
+    if (options.trackReplyHealth !== false && (!options.systemPromptOverride || options.trackReplyHealth === true)) await require('../ai-provider/serviceMonitor').recordReply(false);
     console.error('[Recommendation] 错误:', error.message);
     yield {
       type: 'error',

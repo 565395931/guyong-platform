@@ -1,5 +1,6 @@
 <template>
   <div class="app-layout">
+    <AiServiceMonitor />
     <button v-if="mobileMenuOpen" class="app-layout__backdrop" aria-label="关闭导航" @click="mobileMenuOpen = false" />
     <AppSidebar class="app-layout__sidebar" :mobile-open="mobileMenuOpen" @close-mobile="mobileMenuOpen = false" />
     <div class="app-layout__right">
@@ -20,6 +21,7 @@ import { inject, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import AppSidebar from './AppSidebar.vue'
 import AppHeader from './AppHeader.vue'
+import AiServiceMonitor from './AiServiceMonitor.vue'
 import { useUserStore } from '@/stores/user'
 import { useConversationStore } from '@/stores/conversation'
 import { websocketService } from '@/api/websocket'

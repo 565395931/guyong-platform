@@ -261,7 +261,7 @@ const formatDuration = (seconds) => {
 
 const roleLabel = (role) => ({
   agent: '客服',
-  supervisor: '主管',
+
   admin: '管理员',
   unassigned: '历史未归属'
 }[role] || role || '-')

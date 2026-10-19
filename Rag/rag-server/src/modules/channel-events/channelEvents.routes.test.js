@@ -76,9 +76,9 @@ test('JWT middleware rejects missing, invalid, wrong-contract and disabled-user 
   assert.equal(disabledResponse.statusCode, 401)
 })
 
-test('only agent supervisor and admin roles can read events', () => {
+test('only agent and admin roles can read events', () => {
   assert.equal(typeof requireEventReader, 'function')
-  for (const role of ['agent', 'supervisor', 'admin']) {
+  for (const role of ['agent', 'admin']) {
     const request = { user: { id: 9, role } }
     let continued = false
     requireEventReader(request, responseDouble(), () => { continued = true })

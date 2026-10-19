@@ -24,6 +24,7 @@ function createBridgeGateway({
   inboundService,
   commandStatusService,
   accountSnapshotService,
+  orderIngestService,
   configurationProvider = async () => ({}),
   environment = process.env.NODE_ENV || 'development',
   allowInsecureLan = process.env.BRIDGE_ALLOW_INSECURE_LAN === 'true',
@@ -134,6 +135,13 @@ function createBridgeGateway({
     } else if (envelope.type === 'account.snapshot') {
       // 节点上报"当前会话列表"，用于归档/恢复判定
       result = await accountSnapshotService?.handle?.({
+        envelope,
+        nodeId: session.databaseNodeId,
+        nodeKey: session.nodeId
+      }) || result
+    } else if (envelope.type === 'commerce.orders.scraped') {
+      // 节点上报桌面采集的订单（千帆订单页），入库 orders 表（按订单号幂等）
+      result = await orderIngestService?.handle?.({
         envelope,
         nodeId: session.databaseNodeId,
         nodeKey: session.nodeId

@@ -4,6 +4,8 @@ const assert = require('node:assert/strict')
 const {
   DESKTOP_BRIDGE_ADAPTER_TYPE,
   DESKTOP_BRIDGE_ADAPTER_ID,
+  CHANNEL_ADAPTER_IDS,
+  expectedAdapterIdForChannel,
   hasCompleteDesktopBridgeAccountConfig,
   normalizeDesktopBridgeAccountConfig,
   parseDesktopBridgeAccountConfig,
@@ -79,6 +81,41 @@ test('prepare 接受自定义 adapterId（为将来其它平台预留）', () =>
     config: { shopName: '某店', machineFingerprint: 'fp-1', adapterId: 'pinduoduo.mobile' }
   })
   assert.equal(prepared.adapterId, 'pinduoduo.mobile')
+})
+
+test('prepare 按渠道决定 adapterId（douyin / xiaohongshu）', () => {
+  const douyin = prepareDesktopBridgeAccountCreation({
+    channel: 'douyin',
+    config: { shopName: '某店', machineFingerprint: 'fp-1' }
+  })
+  assert.equal(douyin.adapterId, 'doudian.feige')
+  assert.equal(douyin.config.adapterId, 'doudian.feige')
+
+  const xhs = prepareDesktopBridgeAccountCreation({
+    channel: 'xiaohongshu',
+    config: { shopName: '某店', machineFingerprint: 'fp-1' }
+  })
+  assert.equal(xhs.adapterId, 'xiaohongshu.qianfan')
+  assert.equal(xhs.config.adapterId, 'xiaohongshu.qianfan')
+})
+
+test('prepare 按渠道覆盖 config 里携带的错渠道 adapterId', () => {
+  const prepared = prepareDesktopBridgeAccountCreation({
+    channel: 'xiaohongshu',
+    // 检测结果里若带了飞鸽的 adapterId，不允许串到小红书账号上
+    config: { shopName: '某店', machineFingerprint: 'fp-1', adapterId: 'doudian.feige' }
+  })
+  assert.equal(prepared.adapterId, 'xiaohongshu.qianfan')
+  assert.equal(prepared.config.adapterId, 'xiaohongshu.qianfan')
+})
+
+test('expectedAdapterIdForChannel 未知渠道返回空串（保持旧回落行为）', () => {
+  assert.equal(expectedAdapterIdForChannel('douyin'), 'doudian.feige')
+  assert.equal(expectedAdapterIdForChannel('XiaoHongShu'), 'xiaohongshu.qianfan')
+  assert.equal(expectedAdapterIdForChannel('pinduoduo'), 'pinduoduo.workbench')
+  assert.equal(expectedAdapterIdForChannel('kuaishou'), '')
+  assert.equal(expectedAdapterIdForChannel(''), '')
+  assert.equal(expectedAdapterIdForChannel(undefined), '')
 })
 
 test('parse 能往返加密后的持久化形态', () => {

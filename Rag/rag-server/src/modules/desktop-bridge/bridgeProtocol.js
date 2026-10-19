@@ -5,7 +5,7 @@ const PROTOCOL_VERSION = '1.0'
 const MAX_FRAME_BYTES = 1024 * 1024
 const TYPES = Object.freeze([
   'node.hello', 'node.ready', 'node.heartbeat',
-  'account.snapshot', 'account.state.changed',
+  'account.snapshot', 'account.state.changed', 'commerce.orders.scraped',
   'message.inbound', 'message.send', 'message.command.status',
   'event.ack', 'server.error'
 ])
@@ -51,6 +51,14 @@ const payloadSchemas = {
     health: z.record(z.unknown()).optional()
   }).strict(),
   'account.snapshot': z.object({ accounts: z.array(z.record(z.unknown())) }).strict(),
+  // 桌面客户端采集的订单（当前：千帆订单页）。行内字段保持开放（record），
+  // 由 scrapedOrderIngestService 做字段级校验与映射。
+  'commerce.orders.scraped': z.object({
+    adapterId: z.string().trim().min(1).max(120),
+    source: z.string().trim().max(60).optional(),
+    capturedAt: timestamp.optional(),
+    orders: z.array(z.record(z.unknown())).max(1000)
+  }).strict(),
   'account.state.changed': z.object({
     accountId,
     state: z.enum(['online', 'offline', 'degraded', 'error']),
@@ -122,6 +130,7 @@ const envelopeSchema = z.discriminatedUnion('type', [
   eventEnvelope('node.heartbeat'),
   eventEnvelope('account.snapshot'),
   eventEnvelope('account.state.changed'),
+  eventEnvelope('commerce.orders.scraped'),
   eventEnvelope('message.inbound'),
   z.object({
     ...baseFields,

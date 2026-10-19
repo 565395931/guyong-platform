@@ -37,7 +37,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
+import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -49,7 +52,39 @@ sys.path.insert(0, HERE)
 CRED_FILE = os.path.join(HERE, ".bridge-node.json")
 PROTOCOL_VERSION = "1.0"
 NODE_VERSION = "1.0.0"
-ADAPTER_IDS = ["doudian.feige"]
+
+# 一个节点可承载多个适配器（一台机器只能签发一个节点，见 provision 的机指纹幂等）。
+# doudian.feige = 飞鸽聊天采集/发送；xiaohongshu.qianfan = 千帆订单定时采集；
+# pinduoduo.workbench = 拼多多工作台客服聊天视觉采集（截图+OCR）。
+ADAPTER_IDS = ["doudian.feige", "xiaohongshu.qianfan", "pinduoduo.workbench"]
+
+# 拼多多视觉读取器所在目录（独立线程运行，产物走同一条 WS）
+PDD_READER_DIR = os.path.normpath(os.path.join(HERE, "..", "pinduoduo-uia-probe"))
+
+
+def pdd_reader_config() -> dict:
+    """环境变量：PDD_READER_ENABLED=1 启用；PDD_READER_INTERVAL_SECONDS 轮询间隔。"""
+    enabled = os.environ.get("PDD_READER_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    try:
+        interval = float(os.environ.get("PDD_READER_INTERVAL_SECONDS", "15"))
+    except ValueError:
+        interval = 15.0
+    return {"enabled": enabled, "interval": max(5.0, interval)}
+
+# 千帆订单定时采集（子进程调用 qianfan-uia-probe/qianfan_orders.py，与节点进程隔离）。
+QIANFAN_ORDERS_SCRIPT = os.path.normpath(
+    os.path.join(HERE, "..", "qianfan-uia-probe", "qianfan_orders.py"))
+
+
+def qianfan_orders_config() -> dict:
+    """环境变量配置：QIANFAN_ORDERS_ENABLED=1 且 QIANFAN_ORDERS_AT=HH:MM 时启用。"""
+    enabled = os.environ.get("QIANFAN_ORDERS_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    at = os.environ.get("QIANFAN_ORDERS_AT", "").strip()
+    try:
+        timeout = float(os.environ.get("QIANFAN_ORDERS_TIMEOUT_SECONDS", "240"))
+    except ValueError:
+        timeout = 240.0
+    return {"enabled": enabled, "at": at, "timeout": timeout}
 
 EXIT_OK = 0
 EXIT_NO_DEPENDENCY = 5
@@ -135,6 +170,15 @@ class BridgeNode:
         self.conversation_list_readable = False
         self.last_snapshot = 0.0
         self.snapshot_interval = 10.0
+        # 千帆订单定时采集：记录上次执行日期（同日不重复触发；进程重启会重跑一次）
+        self.last_qianfan_orders_date: Optional[str] = None
+        # 已上报、等待入库确认的订单批次：eventId -> 条数
+        self.pending_order_uploads: dict[str, int] = {}
+        # 拼多多视觉读取（独立线程）：账号 id 从 node.ready 的租约里按 adapterId 认领
+        self.pdd_account_id: Optional[int] = None
+        self.pdd_queue: "queue.Queue[dict]" = queue.Queue()
+        self.pdd_thread: Optional[threading.Thread] = None
+        self.pdd_stop = threading.Event()
         # 待执行的发送指令（服务端 -> 节点 -> 桌面客户端）
         self.command_queue: list[dict] = []
         # 头像内容签名：同一客户头像没变就不重复上传
@@ -195,17 +239,33 @@ class BridgeNode:
             ]
             if self.account_id is None and accounts:
                 self.account_id = int(accounts[0]["accountId"])
+            for account in accounts:
+                if account.get("adapterId") == "pinduoduo.workbench":
+                    self.pdd_account_id = int(account["accountId"])
             log(f"node.ready：下发 {len(accounts)} 个账号，租约 {len(self.leases)} 个"
                 f"，心跳间隔 {self.heartbeat_interval:.0f}s")
             for account in accounts:
                 log(f"  · 账号 {account['accountId']} {account.get('channel')} "
                     f"{account.get('accountName')} adapter={account.get('adapterId')}")
+            if self.pdd_account_id is not None:
+                log(f"[拼多多] 已认领账号 id={self.pdd_account_id}")
+            self.start_pdd_reader()
             return
 
         if type_ == "event.ack":
             payload = frame.get("payload", {})
             status = payload.get("status")
-            if status in ("processed", "duplicate"):
+            ack_for = payload.get("ackForEventId")
+            pending = getattr(self, "pending_order_uploads", None)
+            if pending is not None and ack_for in pending:
+                count = pending.pop(ack_for)
+                detail = payload.get("message") or ""
+                if status == "processed":
+                    log(f"[千帆订单] 入库确认：{detail}（上报 {count} 条）")
+                else:
+                    log(f"[千帆订单] 入库失败：{status} {payload.get('errorCode') or ''} "
+                        f"{detail}（上报 {count} 条）")
+            elif status in ("processed", "duplicate"):
                 pass
             else:
                 log(f"ack 异常: {status} {payload.get('errorCode') or ''} "
@@ -329,6 +389,180 @@ class BridgeNode:
         self.avatar_signatures[customer_key] = signature
         log(f"截到客户头像（{len(png)} 字节，签名 {signature}）")
         return base64.b64encode(png).decode("ascii")
+
+    def maybe_collect_qianfan_orders(self) -> None:
+        """到点采集千帆订单（子进程执行，与节点主循环隔离）。
+
+        说明：
+        - 采集期间聊天轮询会暂停（主循环内联执行）；飞鸽读界面是无状态的，
+          恢复后下一轮会把期间的消息按指纹补读，不会丢。
+        - 采集脚本内部有 try/finally：无论成败都会把千帆界面点回客服页。
+        - 触发即记账（同日不重跑），避免采集失败后每轮循环反复触发。
+        """
+        cfg = qianfan_orders_config()
+        if not cfg["enabled"] or not cfg["at"]:
+            return
+        now = datetime.now()
+        try:
+            hh, mm = (int(part) for part in cfg["at"].split(":", 1))
+            due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        except ValueError:
+            log(f"QIANFAN_ORDERS_AT 格式应为 HH:MM，收到 {cfg['at']!r}，本日跳过")
+            self.last_qianfan_orders_date = now.date().isoformat()
+            return
+        today = now.date().isoformat()
+        if now < due or self.last_qianfan_orders_date == today:
+            return
+        self.last_qianfan_orders_date = today
+
+        log(f"[千帆订单] 定时采集开始（{cfg['at']}），聊天轮询暂停至采集完成…")
+        started = time.monotonic()
+        succeeded = False
+        try:
+            proc = subprocess.run(
+                [sys.executable, QIANFAN_ORDERS_SCRIPT, "collect"],
+                capture_output=True, text=True, timeout=cfg["timeout"],
+                encoding="utf-8", errors="replace", cwd=os.path.dirname(QIANFAN_ORDERS_SCRIPT))
+            for line in (proc.stdout or "").strip().splitlines()[:8]:
+                log("  " + line)
+            if proc.returncode != 0:
+                stderr_tail = (proc.stderr or "")[:200]
+                log(f"[千帆订单] 退出码={proc.returncode}，stderr: {stderr_tail}")
+            else:
+                succeeded = True
+        except subprocess.TimeoutExpired:
+            log(f"[千帆订单] 超时（>{cfg['timeout']:.0f}s），已放弃本轮；"
+                "采集脚本会自行把界面切回客服页")
+        except Exception as exc:  # noqa: BLE001
+            log(f"[千帆订单] 失败：{type(exc).__name__}: {exc}")
+        finally:
+            log(f"[千帆订单] 本轮结束，用时 {time.monotonic() - started:.0f}s")
+
+        if succeeded:
+            self.upload_scraped_orders()
+
+    def upload_scraped_orders(self) -> None:
+        """把最近一次采集结果上报服务端入库（commerce.orders.scraped）。
+
+        - 读采集器落盘的 latest JSON（节点不解析 stdout，避免格式耦合）；
+        - 入库幂等键是订单号，每日重跑不产生重复行；
+        - 入库确认在 event.ack 里回来（见 handle_frame），失败只记日志不重试——
+          下一轮定时采集会自然重报，人工也可重跑采集补齐。
+        """
+        if self.ws is None:
+            log("[千帆订单] 未连接服务端，跳过订单上报（本轮结果留在本机 out/）")
+            return
+        if not self.allow_send:
+            log("[千帆订单] --dry-run：跳过订单上报")
+            return
+        latest = os.path.normpath(os.path.join(
+            os.path.dirname(QIANFAN_ORDERS_SCRIPT), "out", "qianfan_orders_latest.json"))
+        try:
+            with open(latest, encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception as exc:  # noqa: BLE001
+            log(f"[千帆订单] 读取采集结果失败（{latest}）：{type(exc).__name__}: {exc}")
+            return
+        orders = ((payload.get("orders") or {}).get("rows")) or []
+        if not orders:
+            log("[千帆订单] 本次采集无订单，跳过上报")
+            return
+        env = envelope("commerce.orders.scraped", {
+            "adapterId": payload.get("adapterId") or "xiaohongshu.qianfan",
+            "source": "qianfan_orders",
+            "capturedAt": payload.get("capturedAt"),
+            "orders": orders,
+        }, node_key=self.node_key)
+        self.pending_order_uploads[env["eventId"]] = len(orders)
+        self.ws.send(json.dumps(env, ensure_ascii=False))
+        log(f"[千帆订单] 已上报 {len(orders)} 条订单，等待入库确认…")
+
+    def start_pdd_reader(self) -> None:
+        """启动拼多多视觉读取线程（幂等；未启用或已启动则直接返回）。"""
+        cfg = pdd_reader_config()
+        if not cfg["enabled"] or self.pdd_thread is not None:
+            if not cfg["enabled"]:
+                log("[拼多多] 未启用（PDD_READER_ENABLED 未设置）")
+            return
+        if PDD_READER_DIR not in sys.path:
+            sys.path.insert(0, PDD_READER_DIR)
+        try:
+            import pdd_reader  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            log(f"[拼多多] 读取器导入失败: {type(exc).__name__}: {exc}")
+            return
+
+        def loop() -> None:
+            reader = pdd_reader.PddChatReader(scale=2)
+            try:
+                sentinel = pdd_reader.PddSentinel()
+                log("[拼多多] 哨兵已启用：只盯拼多多进程的浮窗 + 待回复区域像素差分"
+                    "（2 秒/次心跳，探测到变化才做完整 OCR 读取）")
+            except Exception as exc:  # noqa: BLE001
+                sentinel = None
+                log(f"[拼多多] 哨兵初始化失败，回退定时轮询: {exc}")
+            last_full = 0.0
+            while not self.pdd_stop.is_set():
+                triggered = False
+                try:
+                    if sentinel is not None:
+                        main_probe = pdd_reader.find_main_window()
+                        if main_probe:
+                            triggered = sentinel.tick(main_probe)
+                except Exception:  # noqa: BLE001
+                    triggered = True  # 哨兵异常时保守触发一次完整读取
+                due = (time.monotonic() - last_full) >= max(10.0, cfg["interval"])
+                if not (triggered or due):
+                    self.pdd_stop.wait(2.0)
+                    continue
+                last_full = time.monotonic()
+                try:
+                    result = reader.read_once(only_changed=True, log=lambda m: log(f"[拼多多] {m}"))
+                    for index, msg in enumerate(result.get("newMessages", [])):
+                        if self.pdd_account_id is None:
+                            log("[拼多多] 尚未认领账号（等待 node.ready），本条留在下轮")
+                            break
+                        self.pdd_queue.put(self._pdd_payload(msg, index))
+                except Exception as exc:  # noqa: BLE001
+                    import traceback
+                    log(f"[拼多多] 读取异常: {type(exc).__name__}: {exc}")
+                    log(traceback.format_exc())
+                self.pdd_stop.wait(1.0)
+
+        self.pdd_thread = threading.Thread(target=loop, name="pdd-reader", daemon=True)
+        self.pdd_thread.start()
+        log(f"[拼多多] 读取线程已启动（间隔 {cfg['interval']:.0f}s）")
+
+    def _pdd_payload(self, msg: dict, batch_index: int) -> dict:
+        """读取器消息 → message.inbound 负载（与 inboundBridgeService 的约定一致）。
+
+        ⚠️ clientTimestamp 为空时必须**省略该字段**而不是给 null：
+        协议里它是 `timestamp.optional()`（允许缺省、不允许 null），
+        传 null 会导致 INVALID_ENVELOPE、网关直接断开连接（实测踩过）。
+        """
+        direction = "in" if msg.get("direction") == "in" else "out"
+        payload = {
+            "accountId": self.pdd_account_id,
+            "channel": "pinduoduo",
+            "platformConversationId": msg["conversationKey"],
+            "platformCustomerId": msg["conversationKey"],
+            "channelMessageId": msg["fingerprint"],
+            "userName": msg["conversationName"],
+            "content": msg["text"],
+            "messageType": "text",
+            "media": [],
+            "platformPayload": {
+                "direction": direction,
+                "directionBasis": "pdd_visual_left_right",
+                "batchIndex": batch_index,
+                "source": "pinduoduo.workbench",
+                "timePrecision": "minute",
+                "observedDirection": direction,
+            },
+        }
+        if msg.get("clientTimestamp"):
+            payload["clientTimestamp"] = msg["clientTimestamp"]
+        return payload
 
     def send_account_snapshot(self) -> None:
         """上报当前会话列表，供后端判定归档/恢复。
@@ -528,6 +762,23 @@ class BridgeNode:
                 # 2.7) 执行发送指令（服务端下发 -> 写入飞鸽 -> 点击发送）
                 while self.command_queue:
                     self.run_command(self.command_queue.pop(0))
+
+                # 2.8) 千帆订单定时采集（到点触发；采集期间本循环暂停，恢复后补读消息）
+                self.maybe_collect_qianfan_orders()
+
+                # 2.85) 上报拼多多读取器产出的消息（线程摄入队列，这里统一发 WS）
+                while not self.pdd_queue.empty():
+                    payload = self.pdd_queue.get()
+                    try:
+                        self.ws.send(json.dumps(
+                            envelope("message.inbound", payload, node_key=self.node_key),
+                            ensure_ascii=False))
+                        log(f"[拼多多] 已上报 {payload['channelMessageId'][:12]} "
+                            f"dir={payload['platformPayload']['direction']} "
+                            f"conv={payload['platformConversationId']} "
+                            f"len={len(payload['content'])}")
+                    except Exception as exc:  # noqa: BLE001
+                        log(f"[拼多多] 上报失败: {type(exc).__name__}: {exc}")
 
                 # 3) 采集并上报
                 try:

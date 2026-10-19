@@ -68,10 +68,33 @@ const {
 
 const DEFAULT_WAHA_ENGINE = String(process.env.WAHA_ENGINE || 'gows').trim().toLowerCase() === 'webjs' ? 'webjs' : 'gows'
 
-// 本机飞鸽检测探针（只读 UIA）。默认路径按仓库结构推导，可用环境变量覆盖。
-function resolveProbeScript() {
-  if (process.env.FEIGE_PROBE_PATH) return process.env.FEIGE_PROBE_PATH
-  return path.join(__dirname, '..', '..', '..', 'tools', 'feige-uia-probe', 'detect.py')
+// 本机桌面客户端检测探针（只读 UIA）。默认路径按仓库结构推导，可用环境变量覆盖。
+// 每个渠道一个探针脚本；一台机器只有一个桥接节点，检测结果里的机器指纹
+// 在两个平台间完全一致（算法一致），账号会绑到同一个节点上。
+const DESKTOP_PROBE_CONFIGS = Object.freeze({
+  douyin: {
+    scriptEnv: 'FEIGE_PROBE_PATH',
+    pythonEnv: 'FEIGE_PROBE_PYTHON',
+    timeoutEnv: 'FEIGE_PROBE_TIMEOUT_MS',
+    relPath: ['tools', 'feige-uia-probe', 'detect.py']
+  },
+  xiaohongshu: {
+    scriptEnv: 'QIANFAN_PROBE_PATH',
+    pythonEnv: 'QIANFAN_PROBE_PYTHON',
+    timeoutEnv: 'QIANFAN_PROBE_TIMEOUT_MS',
+    relPath: ['tools', 'qianfan-uia-probe', 'detect.py']
+  }
+})
+
+function resolveProbeConfig(channelCode) {
+  return DESKTOP_PROBE_CONFIGS[channelCode] || DESKTOP_PROBE_CONFIGS.douyin
+}
+
+function resolveProbeScript(probeConfig) {
+  if (probeConfig.scriptEnv && process.env[probeConfig.scriptEnv]) {
+    return process.env[probeConfig.scriptEnv]
+  }
+  return path.join(__dirname, '..', '..', '..', ...probeConfig.relPath)
 }
 
 /**
@@ -259,13 +282,17 @@ router.patch('/channels/:code', async (req, res) => {
   }
 })
 
-  // 检测本机飞鸽客户端，供「本地桌面客户端」接入方式使用。
+  // 检测本机桌面客户端（飞鸽 / 千帆），供「本地桌面客户端」接入方式使用。
   // 只调用只读探针（UIA 元素树读取），不点击、不输入、不发送消息。
-  // 前提是后端与飞鸽客户端同机。
+  // 前提是后端与客户端同机。默认渠道 douyin，可传 channel=xiaohongshu。
   router.post('/detect-desktop', async (req, res) => {
-    const pythonBin = process.env.FEIGE_PROBE_PYTHON || 'python'
-    const probeScript = resolveProbeScript()
-    const timeoutMs = Number(process.env.FEIGE_PROBE_TIMEOUT_MS || 40000)
+    const channelCode = normalizeChannelCode((req.body && req.body.channel) || 'douyin')
+    const probeConfig = resolveProbeConfig(channelCode)
+    const pythonBin = process.env[probeConfig.pythonEnv] || process.env.FEIGE_PROBE_PYTHON || 'python'
+    const probeScript = resolveProbeScript(probeConfig)
+    const timeoutMs = Number(
+      process.env[probeConfig.timeoutEnv] || process.env.FEIGE_PROBE_TIMEOUT_MS || 40000
+    )
 
     try {
       const { stdout } = await execFileAsync(pythonBin, ['-X', 'utf8', probeScript], {
@@ -298,7 +325,7 @@ router.patch('/channels/:code', async (req, res) => {
       if (error.code === 'ENOENT') {
         return res.status(503).json({
           success: false,
-          message: `未找到 Python 解释器（${pythonBin}），请安装或在 FEIGE_PROBE_PYTHON 中指定路径`,
+          message: `未找到 Python 解释器（${pythonBin}），请安装或在 ${probeConfig.pythonEnv} 中指定路径`,
           detail: { code: error.code, probeScript }
         })
       }
@@ -344,7 +371,7 @@ router.patch('/channels/:code', async (req, res) => {
 
     if (connectionMode === 'desktop_bridge') {
       try {
-        const prepared = prepareDesktopBridgeAccountCreation({ config })
+        const prepared = prepareDesktopBridgeAccountCreation({ config, channel: channelCode })
         adapterType = prepared.adapterType
         fullConfig = prepared.config
         // adapterId 供 desktop_bridge_bindings 使用（绑定表要求 adapter_id 非空）

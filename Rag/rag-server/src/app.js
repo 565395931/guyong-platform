@@ -87,6 +87,7 @@ const { ConnectionRegistry } = require('./modules/desktop-bridge/connectionRegis
 const { createBridgeCommandService, setActiveBridgeCommandService } = require('./modules/desktop-bridge/bridgeCommandService')
 const { createAccountSnapshotService } = require('./modules/desktop-bridge/accountSnapshotService')
 const { createBridgeExpiryService } = require('./modules/desktop-bridge/bridgeExpiryService')
+const { createScrapedOrderIngestService } = require('./modules/desktop-bridge/scrapedOrderIngestService')
 const desktopBridgeRoutes = require('./routes/desktopBridge')
 
 // 导入渠道适配器注册中心
@@ -433,6 +434,8 @@ if (String(process.env.BRIDGE_ENABLED || '').toLowerCase() === 'true') {
         // 表现为「消息其实已发到客户端，但程序显示超时失败」。
         commandStatusService: { handle: bridgeCommandService.handleStatus },
         accountSnapshotService: createAccountSnapshotService({ sequelize }),
+        // 千帆桌面采集的订单入库（按订单号幂等，见 services 文件头部的映射说明）
+        orderIngestService: createScrapedOrderIngestService({ sequelize }),
         configurationProvider: createBridgeConfigurationProvider({
           sequelize,
           leaseService: bridgeLeaseService
